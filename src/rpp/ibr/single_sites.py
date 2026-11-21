@@ -391,8 +391,8 @@ def block_folder(st: Dict[str, Any], root: PathLike) -> Path:
 
 def block_roots() -> List[Path]:
     """1.0: the further blocks' roots of ``RPP_BLOCK_ROOTS`` (``D:\\rover_blocks;E:\\more``), those that exist."""
-    import os
-    raw = os.environ.get("RPP_BLOCK_ROOTS") or ""
+    from .. import env as rpp_env
+    raw = rpp_env.get("RPP_BLOCK_ROOTS") or ""
     return [Path(x.strip()) for x in raw.replace(",", ";").split(";") if x.strip() and Path(x.strip()).is_dir()]
 
 

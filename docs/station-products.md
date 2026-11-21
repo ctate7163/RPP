@@ -56,7 +56,7 @@ block's tie points.
 
 The depth filter (`rpp.sfm.depth_filter`) works on copies of the maps and drops:
 
-- pixels at a depth step of more than 5 % between neighbours, plus 1 pixel around them: the flying pixels at a
+- pixels at a depth step of more than 5 % between neighbors, plus 1 pixel around them: the flying pixels at a
   rock's outline that become skins in the mesh;
 - islands of fewer than 64 pixels;
 - pixels whose normal faces away from the camera;

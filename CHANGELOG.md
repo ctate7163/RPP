@@ -118,6 +118,10 @@ still those of 0.99; 1.0.0 will carry the models of the third freeze run.
   is terrain), and kept as it is just above the skyline (the original up to 1.5 deg, the fit from 6 deg up; "it
   should have a softer touch near the horizon"): hazy distant mountains stay. Only small specks below the skyline are
   recolored. Checked on the 0.99 panoramas of Sol 9, 52, 86 and 362.
+- CI: the docs build and the tests run again on Python 3.10 and 3.11 - three studies' f-strings used Python 3.12
+  syntax (quotes reused inside, a backslash), so mkdocstrings could not read `rpp_studies.calibration.hazfit` and the
+  3.11 tests could not import them; British spellings and an `RPP_` variable read outside `rpp.env` from today's
+  changes fixed; a PDS test-data fetch that fails no longer stops the test session.
 - RPV: the drive is back on the 2D page - the steering wheel above the rover button shows wherever the station has
   the drive (no longer only with `?experimental=1`); on a screen up / down arrows drive and left / right turn. In the
   headset, while driving, either thumbstick's left / right turns the rover (the viewer rides along) instead of the

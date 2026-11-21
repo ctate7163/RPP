@@ -533,7 +533,7 @@ def describe(res: Dict[str, Any]) -> List[str]:
             out.append(f"{fam} rig: baseline {r['baseline_m']:.4f} m; drift pitch {1e3 * d['pitch_mdeg_per_sol']:+.2f}, yaw "
                        f"{1e3 * d['yaw_mdeg_per_sol']:+.2f}, roll {1e3 * d['roll_mdeg_per_sol']:+.2f} mdeg/1000 sol over "
                        f"{d['blocks']} blocks; scatter {', '.join(f'{x:.1f}' for x in r['scatter_mdeg'])} mdeg"
-                       + (f"; fitted {', '.join(f'{n} {v:+.2f} +- {d['se_mdeg_per_1000sol'][n]:.2f}' for n, v in d['fitted_mdeg_per_1000sol'].items())}"
+                       + (f"; fitted {', '.join(n + ' ' + format(v, '+.2f') + ' +- ' + format(d['se_mdeg_per_1000sol'][n], '.2f') for n, v in d['fitted_mdeg_per_1000sol'].items())}"
                           f" mdeg/1000 sol, held at 0 (|z| < {RIG_RATE_MIN_Z:g}): {', '.join(d['held_at_zero']) or 'none'}"
                           if d.get("fitted_mdeg_per_1000sol") else ""))
         else:

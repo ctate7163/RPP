@@ -35,7 +35,11 @@ def _test_data_dir() -> Path:
         import shutil
         from rpp.pds import fetch_products
         arch = cache.parent / "pds"
-        rep = fetch_products(names, arch, labels=True)
+        try:                                     # 1.0: an archive that cannot be reached skips those tests, not all
+            rep = fetch_products(names, arch, labels=True)
+        except Exception as e:                   # noqa: BLE001
+            print(f"conftest: the PDS test products were not fetched ({type(e).__name__}: {e})", file=sys.stderr)
+            rep = {}
         cache.mkdir(parents=True, exist_ok=True)
         for f in rep.get("files", []):
             if Path(f).suffix.upper() == ".IMG" or Path(f).suffix.lower() == ".xml":

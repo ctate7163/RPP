@@ -295,7 +295,7 @@ def figure1_pipeline(out_png: Path, dpi: int = DPI) -> Dict[str, Any]:
     ax.set_ylim(3, 100)
     ax.axis("off")
     INK, EDGE = "#1f2933", "#52606d"
-    GREY, SAND, BLUE, GREEN, WHITE = "#eef0f2", "#f6ead7", "#dbe9f6", "#e3f1e4", "#ffffff"
+    GRAY, SAND, BLUE, GREEN, WHITE = "#eef0f2", "#f6ead7", "#dbe9f6", "#e3f1e4", "#ffffff"
 
     def box(x, y, w, h, title, lines, fc, dashed=False, fs=7.8, z=3, lw=1.1):
         ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.3,rounding_size=1.2", fc=fc, ec=EDGE, lw=lw,
@@ -317,9 +317,9 @@ def figure1_pipeline(out_png: Path, dpi: int = DPI) -> Dict[str, Any]:
                 bbox=dict(fc="white", ec="none", pad=1.5))
     C1, C2, C3, W, LW = 42, 73, 104, 27, 34
     head(1, 97.5, "From outside")
-    box(1, 84, LW, 11, "PDS archive", ["image products and labels,", "radiance calibrated for science"], GREY)
-    box(1, 72, LW, 10, "Rover localization", ["waypoints and attitude", "for every stop"], GREY)
-    box(1, 60, LW, 10, "Atmospheric conditions", ["local weather and solar", "brightness measurements"], GREY)
+    box(1, 84, LW, 11, "PDS archive", ["image products and labels,", "radiance calibrated for science"], GRAY)
+    box(1, 72, LW, 10, "Rover localization", ["waypoints and attitude", "for every stop"], GRAY)
+    box(1, 60, LW, 10, "Atmospheric conditions", ["local weather and solar", "brightness measurements"], GRAY)
     head(1, 55, "Solved with RPP")
     box(1, 39, LW, 13, "Camera models", ["focal length, intrinsics and", "distortion varied with temperature,",
                                          "focus, zoom and sol trend"], SAND)

@@ -453,11 +453,12 @@ def main(argv=None) -> int:
     ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE", help="more settings for every variant")
     ap.add_argument("--list", action="store_true", help="the studies and their variants")
     a = ap.parse_args(argv)
+    TODAY_DEFAULT = "today's default"           # outside the f-string: Python 3.10 and 3.11 take no backslash there
     if a.list or not a.studies:
         for st, vs in STUDIES.items():
             print(f"{st} ({TITLES.get(st, '')}):")
             for v, s in vs.items():
-                print(f"   {v:18s} {json.dumps(s) if s else 'today\'s default'}")
+                print(f"   {v:18s} {json.dumps(s) if s else TODAY_DEFAULT}")
         return 0
     for st in a.studies:
         st = st.upper()
