@@ -36,7 +36,7 @@ def test_harmonic_fill_does_not_rise_over_a_wide_hole():
     fill = V2[F2[len(F):]].reshape(-1, 3)
     r = np.hypot(fill[:, 0], fill[:, 1])
     assert rep["fill_harmonic"]["nodes"] > 0
-    assert fill[(r > 6) & (r < 50), 2].max() < 0.1          # no hill: within the rim's few centimetres
+    assert fill[(r > 6) & (r < 50), 2].max() < 0.1          # no hill: within the rim's few centimeters
 
 
 def test_fill_stays_under_the_line_of_sight():
