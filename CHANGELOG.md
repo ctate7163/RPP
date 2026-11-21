@@ -9,6 +9,35 @@ The development history before 1.0 is in
 [`docs/history/`](https://github.com/ctate7163/rpp/tree/main/docs/history): `CHANGELOG_v0p95-v0p99.md`,
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
+## 1.1.0.dev0 — in development (branch v1p1)
+
+Station meshes without the misshapen fill and the failed depth maps behind them (Christian, 21 Nov 2026: "a wrong
+large rounded hill behind the rover", "mesh floaters and spikes in rockytop" - "How can we prevent these sorts of
+misshapen mesh artifacts?").
+
+- **Depth range.** New station workspaces search depth 0.5-300 m (`dense.STATION_DEPTH_RANGE`) instead of each
+  frame's tie-point range. The Van Zyl frame looking behind the rover had tie points out to 1.9 km; its search ran to
+  2.3 km, its map kept 8 % of the frame and no ground within 8 m, and the sector behind the rover had no measured
+  surface at all.
+- **Depth-map check and repair.** After the stereo step every frame's geometric map is checked against its terrain
+  (`check_depth_maps`: under 20 % of the frame and under 0.4 x the median frame = failed); a failed frame is made again
+  once with the depth range (`stereo/rpp_depth_repair.json`), also in a workspace whose maps are otherwise kept, and
+  `rpp dense` keeps the stereo step for it. 1.0's fused clouds are still accepted (the fusion code is unchanged).
+- **Hole fill bounded by what was seen** (`mesh.FILL_SEEN_RULES`). The nodes away from measured surface are a
+  harmonic (membrane) surface over the hole, which cannot rise above its rim (the cubic made the Van Zyl hill);
+  seen from the pivot the fill stays under the ray to any farther measured surface the pivot sees (the Skinner Ridge
+  "cone" climbed an outcrop's shadow in front of measured terrain); and under the measured skyline, where the
+  measured surface reaches out (the dark "teeth" on the horizon at Rockytop, Wildcat Ridge and Chal Rocks). On six
+  real meshes (Rockytop, Skinner Ridge, Wildcat Ridge, two Chal Rocks stations): fill above the skyline in 0-2
+  two-degree sectors instead of 14-48, none in front of measured terrain at Skinner Ridge (was 165); the Van Zyl hill
+  becomes a flat fill (its sector still needs the depth repair and the new context pair for real ground). A first try,
+  a cap at the highest covered cell within 25 deg, made plateaus and is off (`FILL_RIM_BOUND`).
+- **Mesh checks** in `mesh_report.json` ("fill" -> "checks") and as warnings in the log: the share of each 10 deg
+  sector at 8-30 m left to fill (flags Van Zyl 330-10 deg), fill above the skyline, spike-like triangles.
+- `read_colmap_array` refuses a truncated map file instead of looping for ever.
+- Van Zyl (Sol0052): + the context pair NCAM02049 0671302876 of the sol 49 end-of-drive 360, which sees most of the
+  sector behind the rover.
+
 ## 1.0.0rc1 — 2026-11-20
 
 The first release candidate of 1.0. The pipeline's features and the station products are those of 0.99.53. This release cleans the code,

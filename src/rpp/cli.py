@@ -834,7 +834,9 @@ FUSION_RECORD = "rpp_fusion.json"
 FUSION_CODES_0P99 = ("5aa9d5f18a9a6fdc", "74faa498abf96418", "0c917caf3b0a008e",   # 0.99.51, 0.99.52 (in progress),
                      "5f46dcfc18415f4b")                                          # 0.99.52, 0.99.53
 DENSE_CODE_0P99 = "4e328c4415a18d58"
-LOOSE_FUSION_CODES = FUSION_CODES_0P99 + (DENSE_CODE_0P99,)
+FUSION_CODE_1P0 = "e3cd79c79c791344"                         # 1.0.0rc1's sfm/dense.py (1.1 added the depth check
+                                                               # and repair to the stereo step; the fusion is the same)
+LOOSE_FUSION_CODES = FUSION_CODES_0P99 + (DENSE_CODE_0P99, FUSION_CODE_1P0)
 
 
 def fusion_code() -> str:
@@ -999,8 +1001,8 @@ def cmd_dense(a: argparse.Namespace) -> int:
     # the CUDA python the alignment itself uses (pipeline._default_gpu_python: RPP_GPU_PYTHON, RPP_GPU_PY,
     # %LOCALAPPDATA%\mppp\gpu_python.txt, the rpp_gpu conda env) when neither --python nor GPU_PYTHON names one.
     # 10 Nov on the PC: the 9 Nov fix looked at gpu_python() alone and missed RPP_GPU_PYTHON / the rpp_gpu env
-    from .sfm.dense import (PATCH_MATCH_SOURCES, STATION_FUSION_OPTIONS, STATION_FUSION_STRICT, STATION_STEREO_FAST,
-                            STATION_STEREO_OPTIONS, workspace_stereo_record)
+    from .sfm.dense import (PATCH_MATCH_SOURCES, STATION_DEPTH_RANGE, STATION_FUSION_OPTIONS, STATION_FUSION_STRICT,
+                            STATION_STEREO_FAST, STATION_STEREO_OPTIONS, frames_to_repair, workspace_stereo_record)
     so = dict(STATION_STEREO_OPTIONS) if subset is not None else {}     # 10 Nov: COLMAP's 3 deg stopped Rockytop at 8 m
     fo = dict(STATION_FUSION_OPTIONS) if subset is not None else {}
     # 1.0: new maps with fewer source images and a sparser matching window; a workspace that already holds maps keeps
@@ -1014,6 +1016,7 @@ def cmd_dense(a: argparse.Namespace) -> int:
               f"are kept - their options again ({sources or 'COLMAP 20'} source images)")
     elif subset is not None:
         so.update(STATION_STEREO_FAST)
+        so.update(STATION_DEPTH_RANGE)                             # 1.1: the depth searched, not the tie points' range
         sources = PATCH_MATCH_SOURCES
     if getattr(a, "sources", None) is not None:
         sources = int(a.sources) or None
@@ -1034,7 +1037,11 @@ def cmd_dense(a: argparse.Namespace) -> int:
     need_gpu = True
     if "stereo" in steps and not getattr(a, "restereo", False):           # 0.97.0: nothing to compute -> no GPU, no wait
         from .sfm.dense import stereo_cached
-        if stereo_cached(ws, so, max_image_size=size, sources=sources):
+        bad = frames_to_repair(ws) if (ws / "stereo" / "depth_maps").is_dir() else []
+        if bad:                                                  # 1.1: the stereo step repairs them (run_dense)
+            print(f"dense: {len(bad)} frame(s) with failed depth maps - made again with depth "
+                  f"{STATION_DEPTH_RANGE['depth_min']}-{STATION_DEPTH_RANGE['depth_max']} m: {', '.join(bad)}")
+        if not bad and stereo_cached(ws, so, max_image_size=size, sources=sources):
             steps = [s for s in steps if s != "stereo"]
             need_gpu = False
             print("dense: the stereo maps of this workspace are there, made with these options - stereo skipped, "

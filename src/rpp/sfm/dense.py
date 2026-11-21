@@ -62,6 +62,22 @@ STATION_FUSION_OPTIONS = {"min_num_pixels": 2}
 PATCH_MATCH_SOURCES = 12
 COLMAP_SOURCES = 20                 # what a workspace made by COLMAP's undistorter has (and every workspace before 1.0)
 STATION_STEREO_FAST = {"window_step": 2}
+# 1.1 (Christian, 21 Nov 2026, Van Zyl: "there is still a wrong large rounded hill behind the rover"): THE DEPTH RANGE.
+# Patch-match searches each frame's depth between the nearest and farthest of its tie points (+-25 %) unless the
+# options name a range.  The Van Zyl frame that looks behind the rover (NCAM03052 0671564560) sees the crater rim and
+# has tie points out to 1.9 km: its search ran from 1.2 m to 2.3 km, the random starts were nearly all hundreds of
+# meters away, and its photometric map came out at a median 308 m - the geometric map kept 8 % of the frame and none
+# of the ground within 8 m, so the sector behind the rover had no measured surface at all and the hole fill made a
+# hill there.  New workspaces search STATION_DEPTH_RANGE (the mesh ends at 75 m; what lies beyond 300 m is the far
+# field's), and a frame whose map failed anyway is made again with it (check_depth_maps, repair in run_dense).
+STATION_DEPTH_RANGE = {"depth_min": 0.5, "depth_max": 300.0}
+# A frame's geometric depth map has FAILED when it covers less than DEPTH_CHECK_MIN_SHARE of the frame's terrain
+# (the fusion mask: neither rover nor sky) and less than DEPTH_CHECK_REL of the workspace's median frame (Van Zyl:
+# 8 % against a median of about 40 %).  The shares are kept in stereo/rpp_depth_check.json until the maps change.
+DEPTH_CHECK_MIN_SHARE = 0.2
+DEPTH_CHECK_REL = 0.4
+DEPTH_CHECK_FILE = "rpp_depth_check.json"
+DEPTH_REPAIR_FILE = "rpp_depth_repair.json"
 # THE FUSION, two passes - opt-in (rpp dense --two-pass-fusion) until rpp fusion-compare shows on real stations that
 # it is not worse (Christian, 20 Nov 2026: "without the danger of making anything worse").  The loose fusion (STATION_FUSION_OPTIONS: two pixels) keeps the far terrain that one stereo
 # pair sees, and with it the noise of the near terrain.  A strict fusion (STATION_FUSION_STRICT: four agreeing pixels,
@@ -542,6 +558,94 @@ def set_options(opts: Any, values: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return done
 
 
+def _terrain_mask(ws: Path, rel: str, shape) -> np.ndarray:
+    """1.1: True where a frame's map should have depth - its fusion mask (no rover, no sky) or its rover mask, else
+    the frame's picture (the black border of an undistorted frame is not terrain)."""
+    from PIL import Image
+    for d in (SKY_MASK_DIR, "masks"):
+        f = ws / d / (rel + ".png")
+        if f.is_file():
+            m = Image.open(f).convert("L")
+            if m.size != (shape[1], shape[0]):
+                m = m.resize((shape[1], shape[0]), Image.NEAREST)
+            return np.asarray(m) > 0
+    f = ws / "images" / rel
+    if f.is_file():
+        im = Image.open(f).convert("L")
+        if im.size != (shape[1], shape[0]):
+            im = im.resize((shape[1], shape[0]), Image.NEAREST)
+        return np.asarray(im) > 0
+    return np.ones(shape, bool)
+
+
+def check_depth_maps(ws: PathLike, kind: str = "geometric", force: bool = False) -> Dict[str, Any]:
+    """1.1: the share of each frame's terrain (:func:`_terrain_mask`) that its depth map covers, and the frames whose
+    map failed (:data:`DEPTH_CHECK_MIN_SHARE`, :data:`DEPTH_CHECK_REL`).  Returns {"shares": {image: share},
+    "median": m, "failed": [images]}; kept in ``stereo/rpp_depth_check.json`` while the maps stay the same."""
+    ws = Path(ws)
+    dm = ws / "stereo" / "depth_maps"
+    files = sorted(dm.rglob(f"*.{kind}.bin")) if dm.is_dir() else []
+    stamp = [len(files), max((f.stat().st_mtime for f in files), default=0.0)]
+    cache = ws / "stereo" / DEPTH_CHECK_FILE
+    if not force and cache.is_file():
+        try:
+            old = json.loads(cache.read_text(encoding="utf-8"))
+            if old.get("stamp") == stamp and old.get("kind") == kind:
+                return old
+        except (OSError, ValueError):
+            pass
+    shares: Dict[str, float] = {}
+    for f in files:
+        rel = f.relative_to(dm).as_posix()[:-len(f".{kind}.bin")]
+        try:
+            D = read_colmap_array(f)
+        except Exception:                                        # noqa: BLE001 - an unreadable map counts as empty
+            shares[rel] = 0.0
+            continue
+        if D.ndim == 3:
+            D = D[..., 0]
+        m = _terrain_mask(ws, rel, D.shape)
+        shares[rel] = round(float((D[m] > 0).mean()) if m.any() else 0.0, 4)
+    med = float(np.median(list(shares.values()))) if shares else 0.0
+    failed = sorted(k for k, s in shares.items() if s < DEPTH_CHECK_MIN_SHARE and s < DEPTH_CHECK_REL * med)
+    out = {"kind": kind, "stamp": stamp, "shares": shares, "median": round(med, 4), "failed": failed}
+    try:
+        cache.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+    return out
+
+
+def clear_depth_maps(ws: PathLike, names: Sequence[str]) -> int:
+    """1.1: delete the patch-match outputs of these frames (both kinds; depth, normal, consistency) so that the next
+    patch-match makes them again - COLMAP skips a frame whose maps exist.  Returns the files deleted."""
+    st = Path(ws) / "stereo"
+    k = 0
+    for n in names:
+        for d in ("depth_maps", "normal_maps", "consistency_graphs"):
+            for kind in ("photometric", "geometric"):
+                f = st / d / f"{n}.{kind}.bin"
+                if f.is_file():
+                    f.unlink()
+                    k += 1
+    return k
+
+
+def depth_repairs(ws: PathLike) -> Dict[str, Any]:
+    """1.1: the frames already made again (``stereo/rpp_depth_repair.json``) - each is repaired once."""
+    f = Path(ws) / "stereo" / DEPTH_REPAIR_FILE
+    try:
+        return json.loads(f.read_text(encoding="utf-8")) if f.is_file() else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def frames_to_repair(ws: PathLike, kind: str = "geometric") -> List[str]:
+    """1.1: the frames whose depth map failed and that were not made again yet."""
+    done = depth_repairs(ws)
+    return [n for n in check_depth_maps(ws, kind).get("failed", []) if n not in done]
+
+
 def run_dense(project: SfmProject, workspace: Optional[PathLike] = None, steps=("prepare", "stereo", "fusion"),
               max_image_size: int = DENSE_MAX_IMAGE_SIZE, geom_consistency: bool = True,
               gpu_index: str = "-1", images: Optional[Sequence[str]] = None,
@@ -580,6 +684,30 @@ def run_dense(project: SfmProject, workspace: Optional[PathLike] = None, steps=(
         pycolmap.patch_match_stereo(str(ws), "COLMAP", options=po)
         out["steps"]["stereo"] = {"seconds": round(time.time() - t0, 1), "geom_consistency": bool(geom_consistency),
                                   "options": so, "old_maps": state}
+        # 1.1: a frame whose depth map failed is made again once, with STATION_DEPTH_RANGE (its tie points' range
+        # was the trouble at Van Zyl); its other options stay the workspace's
+        kind = "geometric" if geom_consistency else "photometric"
+        bad = frames_to_repair(ws, kind)
+        if bad:
+            t1 = time.time()
+            before = check_depth_maps(ws, kind)["shares"]
+            for k_, v_ in STATION_DEPTH_RANGE.items():
+                setattr(po, k_, float(v_))
+            cleared = clear_depth_maps(ws, bad)
+            log.warning("dense: %d frame(s) with failed depth maps made again with depth %s-%s m: %s", len(bad),
+                        STATION_DEPTH_RANGE["depth_min"], STATION_DEPTH_RANGE["depth_max"], ", ".join(bad))
+            pycolmap.patch_match_stereo(str(ws), "COLMAP", options=po)
+            after = check_depth_maps(ws, kind, force=True)["shares"]
+            rec = depth_repairs(ws)
+            for n in bad:
+                rec[n] = {"before": before.get(n), "after": after.get(n), "range_m": dict(STATION_DEPTH_RANGE),
+                          "when": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            (ws / "stereo" / DEPTH_REPAIR_FILE).write_text(json.dumps(rec, indent=1), encoding="utf-8")
+            out["steps"]["stereo"]["repair"] = {"frames": {n: rec[n] for n in bad}, "files_cleared": cleared,
+                                                "seconds": round(time.time() - t1, 1)}
+        chk = check_depth_maps(ws, kind)
+        out["steps"]["stereo"]["check"] = {"median": chk["median"], "failed": chk["failed"],
+                                           "lowest": sorted(chk["shares"].items(), key=lambda kv: kv[1])[:3]}
     if "fusion" in steps:
         t0 = time.time()
         fo = pycolmap.StereoFusionOptions()
@@ -736,6 +864,8 @@ def read_colmap_array(path: PathLike):
     raw = Path(path).read_bytes()
     k, n = 0, 0
     while n < 3:
+        if k >= min(len(raw), 64):                               # 1.1: a truncated file looped here for ever
+            raise ValueError(f"not a COLMAP dense map: {path}")
         if raw[k:k + 1] == b"&":
             n += 1
         k += 1

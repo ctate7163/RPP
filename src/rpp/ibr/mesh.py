@@ -909,6 +909,229 @@ FILL_MIN_COVER = 0.6              # a cell counts as covered when its triangles'
 FILL_ROVER_REF_RADIUS_M = 5.0    # rover_keep_m: the ground's height from the triangles within this of the axis, off the footprint
 
 
+# 1.1 (Christian, 21 Nov 2026, on Van Zyl, Rockytop, Skinner Ridge, Wildcat Ridge and Chal Rocks: "a wrong large rounded
+# hill behind the rover", "mesh floaters and spikes" - "How can we prevent these sorts of misshapen mesh artifacts?"):
+# THE FILL MUST NOT CONTRADICT WHAT WAS SEEN.  The dark shapes in the normal maps were the hole fill: a smooth surface
+# over every cell without measured surface, interpolated from the cells around it.  Over a wide hole the cubic rose
+# well above its rim (Van Zyl: 2 m over a 40 deg sector nobody measured); behind an outcrop it climbed the occlusion
+# shadow to the ridge and stood in front of measured terrain (Skinner Ridge: a 20 m "cone"); at the mesh's edge it
+# rose above the skyline the cameras saw (Rockytop, Wildcat Ridge, Chal Rocks: dark "teeth" up to 30 m).  Three upper
+# rules on the fill's node heights, each one that real terrain meets by definition:
+# - THE RIM: the nodes away from measured surface are a harmonic surface over the hole (harmonic_hole_fill), which
+#   cannot rise above its rim (the cubic overshot it; it was clipped only to the whole mesh's highest cell + 0.5 m);
+#   a first try, a cap at the highest covered cell within FILL_RIM_WINDOW_DEG x FILL_RIM_WINDOW_RINGS, made plateaus
+#   (FILL_RIM_BOUND, off);
+# - THE LINE OF SIGHT: seen from the pivot, no higher than the ray to any measured surface farther out on the same
+#   azimuth that the pivot sees (in its 1 deg column, at an elevation no lower than everything nearer) - a surface
+#   there would have hidden it;
+# - THE SKYLINE: no higher than the measured surface's highest elevation on that azimuth (+- FILL_SKY_SMOOTH_BINS;
+#   azimuths whose measured surface stops short of FILL_SKY_REACH of the radius take their neighbors') - above it
+#   the cameras saw sky or the far field.
+FILL_SEEN_RULES = True
+FILL_RIM_BOUND = False           # the rim bound (a plateau per window) - the harmonic fill replaced it
+FILL_RIM_WINDOW_DEG = 25.0
+FILL_RIM_WINDOW_RINGS = 3
+FILL_SIGHT_MARGIN_DEG = 0.2       # the bounds sit this far under the rays ...
+FILL_SIGHT_SLACK_M = 0.05         # ... plus this, so the fill meets measured ground without a step
+FILL_SKY_SMOOTH_BINS = 2
+FILL_SKY_REACH = 0.5             # ... an azimuth's skyline counts when its measured surface reaches this share of the radius
+FILL_VISIBLE_TOL_DEG = 0.05       # a point counts as seen from the pivot when its elevation is within this of the nearer maximum
+
+
+def harmonic_hole_fill(hn: np.ndarray, covered: np.ndarray, edges: np.ndarray, na: int) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """1.1: the fill's nodes away from measured surface by harmonic (membrane) interpolation on the polar grid: each
+    such node the weighted mean of its four neighbors (weights 1/dr^2 across rings, 1/(r dtheta)^2 along them), the
+    nodes that touch a covered cell held at their interpolated height.  A harmonic surface lies between the highest
+    and lowest of its boundary (the maximum principle): no dome over a wide hole (Van Zyl), no climb past its rim.
+    The outer ring is free (no condition); a hole touching no covered cell keeps a faint pull to its old height."""
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import spsolve
+    nr1 = len(edges)
+    pad = np.vstack([covered[:1], covered, covered[-1:]])
+    touch = pad[:-1] | pad[1:]
+    touch = touch | np.roll(touch, 1, axis=1)                   # node (i, j) touches cells (i-1, i) x (j-1, j)
+    touch[0, :] = touch[0, :].any()
+    unknown = ~touch
+    unknown[0, :] = False                                        # the axis keeps its one height
+    n_u = int(unknown.sum())
+    if n_u == 0:
+        return hn, {"nodes": 0}
+    idx = -np.ones(hn.shape, np.int64)
+    idx[unknown] = np.arange(n_u)
+    r = np.asarray(edges, float)
+    dth = np.radians(FILL_AZ_STEP_DEG)
+    rows, cols, vals = [], [], []
+    rhs = np.zeros(n_u)
+    diag = np.zeros(n_u)
+    ii, jj = np.nonzero(unknown)
+    k = idx[ii, jj]
+    def link(i2, j2, w):
+        j2 = j2 % na
+        q = idx[i2, j2]
+        diag[k] += w
+        known = q < 0
+        np.add.at(rhs, k[known], w[known] * hn[i2[known], j2[known]])
+        rows.append(k[~known]); cols.append(q[~known]); vals.append(-w[~known])
+    for di in (-1, 1):
+        i2 = ii + di
+        okk = (i2 >= 0) & (i2 < nr1)
+        w = np.where(okk, 1.0 / np.maximum(np.abs(r[np.clip(i2, 0, nr1 - 1)] - r[ii]), 1e-3) ** 2, 0.0)
+        i2c = np.clip(i2, 0, nr1 - 1)
+        w = np.where(i2c == ii, 0.0, w)
+        link(i2c, jj, w)
+    wt = 1.0 / np.maximum(r[ii] * dth, 1e-3) ** 2
+    for dj in (-1, 1):
+        link(ii, jj + dj, wt)
+    eps = 1e-6 * np.maximum(diag, 1e-12)                         # the faint pull (a hole with no rim stays solvable)
+    diag += eps
+    rhs += eps * hn[ii, jj]
+    A = sp.csr_matrix((np.r_[np.concatenate(vals) if vals else [], diag],
+                       (np.r_[np.concatenate(rows) if rows else [], np.arange(n_u)],
+                        np.r_[np.concatenate(cols) if cols else [], np.arange(n_u)])), shape=(n_u, n_u))
+    sol = spsolve(A.tocsc(), rhs)
+    out = hn.copy()
+    out[ii, jj] = sol
+    return out, {"nodes": n_u, "max_change_m": round(float(np.max(np.abs(sol - hn[ii, jj]))), 2)}
+
+
+# 1.1: THE MESH CHECKS (mesh_report.json "checks", and a warning in the log for each): the share of the terrain's area
+# ground that the measured surface leaves to fill in each CHECK_SECTOR_DEG sector from CHECK_FROM_M to CHECK_TO_M
+# (over CHECK_FILL_SHARE: no usable depth there - Van Zyl behind the rover; or a ridge hides it); fill above the measured skyline; steep long measured triangles (spikes: steeper than
+# CHECK_SPIKE_STEEP from vertical... |normal . up| < CHECK_SPIKE_COS, CHECK_SPIKE_TALL_M tall, an edge over
+# CHECK_SPIKE_EDGE x the median of the measured triangles at that range).
+CHECK_SECTOR_DEG = 10.0
+CHECK_FROM_M = 8.0
+CHECK_TO_M = 30.0
+CHECK_FILL_SHARE = 0.8
+CHECK_SPIKE_COS = 0.2
+CHECK_SPIKE_TALL_M = 0.5
+CHECK_SPIKE_EDGE = 4.0
+
+
+def mesh_checks(V: np.ndarray, F: np.ndarray, n_measured: int, n_terrain: int, pivot: Sequence[float],
+                up: Sequence[float], north: Optional[Sequence[float]] = None, radius_m: float = DEFAULT_RADIUS_M) -> Dict[str, Any]:
+    """1.1: the checks of a station mesh (see CHECK_SECTOR_DEG): ``F[:n_measured]`` the measured terrain,
+    ``F[n_measured:n_terrain]`` its fill.  Azimuths from ``north`` (else from the block's +y)."""
+    P = np.asarray(pivot, float)
+    u = np.asarray(up, float) / np.linalg.norm(up)
+    nn = np.asarray(north if north is not None else (0.0, 1.0, 0.0), float)
+    nn = nn - (nn @ u) * u
+    nn /= np.linalg.norm(nn)
+    ee = np.cross(nn, u)
+    T = np.asarray(V, float)[np.asarray(F[:n_terrain], np.int64)]
+    if not len(T):
+        return {"warnings": []}
+    C = T.mean(1) - P
+    x, y, z = C @ ee, C @ nn, C @ u
+    az = np.degrees(np.arctan2(x, y)) % 360.0
+    rr = np.hypot(x, y)
+    el = np.degrees(np.arctan2(z, rr))
+    area = 0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1)
+    isf = np.arange(len(T)) >= n_measured
+    out: Dict[str, Any] = {"warnings": []}
+    ns = int(round(360.0 / CHECK_SECTOR_DEG))
+    sec = (az // CHECK_SECTOR_DEG).astype(int) % ns
+    far = (rr >= CHECK_FROM_M) & (rr <= min(CHECK_TO_M, radius_m))
+    nz = np.abs(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]) @ u) * 0.5      # the triangles' area seen from above
+    meas = np.bincount(sec[far & ~isf], weights=nz[far & ~isf], minlength=ns)
+    ground = 0.5 * (min(CHECK_TO_M, float(radius_m)) ** 2 - CHECK_FROM_M ** 2) * np.radians(CHECK_SECTOR_DEG)
+    share = np.clip(1.0 - meas / ground, 0.0, 1.0)              # the sector's ground the measured surface leaves to fill
+    out["fill_share_by_sector"] = {f"{int(i * CHECK_SECTOR_DEG)}": round(float(s), 3) for i, s in enumerate(share)}
+    bad = [int(i * CHECK_SECTOR_DEG) for i in np.flatnonzero(share > CHECK_FILL_SHARE)]
+    out["mostly_fill_sectors_deg"] = bad
+    if bad:
+        out["warnings"].append(f"{len(bad)} sector(s) of {CHECK_SECTOR_DEG:g} deg at {CHECK_FROM_M:g}-{CHECK_TO_M:g} m are mostly "
+                               f"fill (no measured surface): azimuth {', '.join(str(b) for b in bad)} deg")
+    b2 = (az // 2).astype(int) % 180
+    mxm = np.full(180, -90.0)
+    np.maximum.at(mxm, b2[~isf], el[~isf])
+    mxf = np.full(180, -90.0)
+    if isf.any():
+        np.maximum.at(mxf, b2[isf], el[isf])
+    reach = np.zeros(180)                                       # only where the measured surface reaches out (a
+    np.maximum.at(reach, b2[~isf], rr[~isf])                     # column it stops short in has no skyline to rise over)
+    above = int(((mxf > mxm + 0.5) & (mxm > -90.0) & (reach >= FILL_SKY_REACH * radius_m)).sum())
+    out["fill_above_skyline_sectors"] = above
+    if above:
+        out["warnings"].append(f"fill rises above the measured skyline in {above} two-degree sector(s)")
+    Tm = T[~isf]
+    if len(Tm):
+        nrm = np.cross(Tm[:, 1] - Tm[:, 0], Tm[:, 2] - Tm[:, 0])
+        nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-12
+        h = Tm @ u
+        tall = h.max(1) - h.min(1)
+        edge = np.linalg.norm(Tm[:, [1, 2, 0]] - Tm, axis=2).max(1)
+        ring = np.minimum((rr[~isf] // 10).astype(int), 20)
+        med = np.zeros(21)
+        for k in np.unique(ring):
+            med[k] = np.median(edge[ring == k])
+        spike = (np.abs(nrm @ u) < CHECK_SPIKE_COS) & (tall > CHECK_SPIKE_TALL_M) & (edge > CHECK_SPIKE_EDGE * med[ring])
+        out["spike_triangles"] = int(spike.sum())
+        if spike.sum():
+            hist = np.bincount(sec[~isf][spike], minlength=ns)
+            out["spike_sectors_deg"] = {f"{int(i * CHECK_SECTOR_DEG)}": int(hist[i]) for i in np.argsort(hist)[::-1][:5] if hist[i]}
+        if spike.sum() >= 100:
+            out["warnings"].append(f"{int(spike.sum())} spike-like triangles (steep, tall, long-edged)")
+    return out
+
+
+def fill_height_bounds(r_m: np.ndarray, az_cell: np.ndarray, h_m: np.ndarray, hp: float, edges: np.ndarray, na: int,
+                       med: np.ndarray, covered: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """1.1: the upper bounds of the fill's node heights above the plane (``(len(edges), na)``; see FILL_SEEN_RULES).
+    ``r_m``, ``az_cell``, ``h_m``: the measured triangles' horizontal range, azimuth cell and height above the plane;
+    ``hp``: the pivot's height above the plane; ``med`` / ``covered``: the covered cells' fill heights (rings x na).
+    Returns (bounds, {"rim", "sight", "sky"}: each rule's bound alone, for the report)."""
+    from scipy.ndimage import maximum_filter
+    nr = len(edges) - 1
+    rn = np.asarray(edges, float)[:, None]
+    big = np.full((nr + 1, na), np.inf)
+    # the rim
+    M = np.where(covered, med, -np.inf)
+    wa = max(1, int(round(FILL_RIM_WINDOW_DEG / FILL_AZ_STEP_DEG)))
+    Mx = maximum_filter(M, size=(2 * FILL_RIM_WINDOW_RINGS + 1, 2 * wa + 1), mode=("nearest", "wrap"))
+    pad = np.vstack([Mx[:1], Mx, Mx[-1:]])                      # node (i, j) touches cells (i-1, i) x (j-1, j)
+    node = np.maximum(np.maximum(pad[:-1], pad[1:]), np.roll(np.maximum(pad[:-1], pad[1:]), 1, axis=1))
+    rim = np.where(np.isfinite(node), node, np.inf)
+    if len(r_m) == 0:
+        return rim, {"rim": rim, "sight": big, "sky": big}
+    el = np.arctan2(np.asarray(h_m, float) - hp, np.maximum(np.asarray(r_m, float), 1e-3))
+    mg = np.radians(FILL_SIGHT_MARGIN_DEG)
+    # the skyline
+    sky = np.full(na, -np.inf)
+    np.maximum.at(sky, az_cell, el)
+    reach = np.zeros(na)                                         # an azimuth whose measured surface stops near the
+    np.maximum.at(reach, az_cell, np.asarray(r_m, float))        # rover (Van Zyl's failed frame) says nothing of its
+    have = np.isfinite(sky) & (reach >= FILL_SKY_REACH * float(edges[-1]))   # skyline: its neighbors' is taken
+    if not have.any():
+        have = np.isfinite(sky)
+    jj = np.arange(na)
+    g = jj[have]
+    sky_f = np.interp(jj, np.r_[g - na, g, g + na], np.tile(sky[have], 3))
+    sky_s = np.max(np.stack([np.roll(sky_f, k) for k in range(-FILL_SKY_SMOOTH_BINS, FILL_SKY_SMOOTH_BINS + 1)]), axis=0)
+    node_sky = np.maximum(sky_s, np.roll(sky_s, 1))
+    sky_b = hp + rn * np.tan(np.clip(node_sky - mg, -1.5, 1.5))[None, :] + FILL_SIGHT_SLACK_M
+    # the line of sight
+    order = np.lexsort((r_m, az_cell))
+    a_s, r_s, e_s = np.asarray(az_cell)[order], np.asarray(r_m, float)[order], el[order]
+    st = np.searchsorted(a_s, jj, side="left")
+    en = np.searchsorted(a_s, jj, side="right")
+    cell_b = np.full((nr + 1, na), np.inf)
+    tol = np.radians(FILL_VISIBLE_TOL_DEG)
+    for j in jj[en > st]:
+        rr, ee = r_s[st[j]:en[j]], e_s[st[j]:en[j]]
+        vis = ee >= np.maximum.accumulate(ee) - tol
+        rv, ev = rr[vis], ee[vis]
+        sm = np.minimum.accumulate(ev[::-1])[::-1]              # the lowest seen elevation from here outward
+        k = np.searchsorted(rv, edges, side="right")
+        m = k < len(rv)
+        cell_b[m, j] = sm[k[m]]
+    node_el = np.minimum(cell_b, np.roll(cell_b, 1, axis=1))
+    sight = np.where(np.isfinite(node_el), hp + rn * np.tan(np.clip(node_el - mg, -1.5, 1.5)) + FILL_SIGHT_SLACK_M, np.inf)
+    if not FILL_RIM_BOUND:
+        rim = big
+    return np.minimum(np.minimum(rim, sight), sky_b), {"rim": rim, "sight": sight, "sky": sky_b}
+
+
 def under_rover(X: np.ndarray, pose: Dict[str, Any]) -> np.ndarray:
     """Points over the rover's footprint on the ground (``pose``: :func:`rpp.ibr.rover_deck.rover_pose`)."""
     from .rover_deck import block_to_mech
@@ -1034,6 +1257,17 @@ def fill_terrain(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], up: Seque
     else:
         hn = np.zeros_like(nx)                                   # no terrain at all: the plane
     hn[0, :] = np.mean(hn[0, :])                                 # the axis is one point
+    if FILL_SEEN_RULES and len(F) and ok.any() and covered.sum() >= 3:      # 1.1: what was seen bounds the fill
+        hn, hrep = harmonic_hole_fill(hn, covered, edges, na)
+        rep["fill_harmonic"] = hrep
+        hp = float(height_above_plane(P[None, :], plane, up)[0])
+        hi, parts = fill_height_bounds(r[ok], ia, h, hp, edges, na, med, covered)
+        cut = (hn > hi) & (edges[:, None] <= float(radius_m) + 1e-6)     # the apron past the mesh is left as it was
+        drop = np.where(cut, hn - hi, 0.0)
+        rep["fill_bounds"] = {"nodes_lowered": int(cut.sum()), "max_lowered_m": round(float(drop.max()), 2),
+                              "by_rule": {k: int((hn > v + 1e-9).sum()) for k, v in parts.items()}}
+        hn = np.where(cut, hi, hn)
+        hn[0, :] = np.min(hn[0, :])
     if underlay:
         rn = np.broadcast_to(edges[:, None], hn.shape)
         far = np.clip((rn - FILL_UNDERLAY_FROM_M) / max(0.1 * FILL_UNDERLAY_FROM_M, 1e-6), 0.0, 1.0)
@@ -1211,6 +1445,14 @@ def build_station_mesh(points: np.ndarray, pivot: Sequence[float], out_dir: Path
         log.info("mesh: terrain fill - %d of %d cells had no surface (%d triangles); %d triangles under the rover replaced",
                  fill_rep["filled"], fill_rep["cells"], fill_rep["triangles"], fill_rep["under_rover_triangles_removed"])
         terrain_tris = [0, int(fill_rep.get("measured_triangles", len(F)))]
+        try:                                                    # 1.1: the mesh checks
+            chk = mesh_checks(V, F, int(fill_rep.get("measured_triangles", len(F))), int(len(F)), pivot, up,
+                              north=(station or {}).get("north_block"), radius_m=radius_m)
+            fill_rep["checks"] = chk
+            for w_ in chk["warnings"]:
+                log.warning("mesh check: %s", w_)
+        except Exception as e:                                  # noqa: BLE001 - a check never stops the mesh
+            log.warning("mesh check failed: %s", e)
     if deck is not None and terrain_only:
         if use_model:
             Vm, Fm = rover_model.model_in_block(deck, parts=rover_model_parts)

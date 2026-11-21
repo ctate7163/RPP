@@ -106,7 +106,7 @@ STALE_S = 900
 LOGON_TASK = "RPP freeze"
 OLD_LOGON_TASK = "MPPP freeze"      # 0.99.3: the RunOnce value of a v0p98 freeze (freeze_097 set it): removed when a v0p99
 #                                   run sets its own, so a reboot starts one freeze, not two
-REQUIRED_VERSION = "1.0"            # 0.99.3 (Christian, 16 Nov 2026: "Is there anything preventing freeze3 from running on v0p99?"):
+REQUIRED_VERSION = "1.1"            # 0.99.3 (Christian, 16 Nov 2026: "Is there anything preventing freeze3 from running on v0p99?"):
 #                                   the run on v0p99 - its own checkout D:\code\RPP_freeze on branch rpp (scripts\windows\
 #                                   freeze.bat of D:\code\RPP); v0p98's freeze runs from D:\code\MPPP_freeze ("0.98" there)
 DEFAULT_MASK = "rpp_mask_v5"         # the registry default: what a block without mask_checkpoint was processed with
