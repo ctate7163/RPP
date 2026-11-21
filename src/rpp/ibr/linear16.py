@@ -187,11 +187,11 @@ def find_product(stem: str, roots: Sequence[PathLike]) -> Optional[Path]:
 
 
 def radiometry_key(cfg: Dict[str, Any]) -> str:
-    """1.1: the identity of the settings that turn a product's radiance into its 16-bit values - the radiometry
+    """1.0.1: the identity of the settings that turn a product's radiance into its 16-bit values - the radiometry
     section (the tau correction, its table and reference, the Sun's distance) and the color section's balances,
     brightness factors and scale.  A cached 16-bit frame made under another key is made again
     (:func:`ensure_linear16`), and a station's stored tone levels are dropped (:func:`reset_stale_levels`) - so a
-    change such as 1.1's Sun-distance term reaches every station product, never a mix of old and new frames."""
+    change such as 1.0.1's Sun-distance term reaches every station product, never a mix of old and new frames."""
     import hashlib
     c = cfg.get("color") or {}
     part = {"radiometry": cfg.get("radiometry") or {},
@@ -202,7 +202,7 @@ def radiometry_key(cfg: Dict[str, Any]) -> str:
 
 
 def reset_stale_levels(path: Optional[PathLike], key: Optional[str]) -> bool:
-    """1.1: a station's shared levels file (``tone_levels.json``: exposure, black point, ground level, color-product
+    """1.0.1: a station's shared levels file (``tone_levels.json``: exposure, black point, ground level, color-product
     parameters) holds values measured on panoramas of one radiometry; when its ``radiometry_key`` is not ``key`` the
     values are dropped (found again by the next panorama) and the key is written.  True when values were dropped."""
     if not path or not key:
@@ -242,7 +242,7 @@ def ensure_linear16(project, names: Iterable[str], pds: Optional[PathLike] = Non
         key = radiometry_key(cfg)
     except FileNotFoundError as e:
         cfg_error = str(e)
-    # 1.1: a frame cached under other radiometric settings (before 1.1: no key - without the Sun's distance) is stale
+    # 1.0.1: a frame cached under other radiometric settings (before 1.0.1: no key - without the Sun's distance) is stale
     stale = {n for n in names if key and (record.get(n) or {}).get("radiometry_key") != key}
     todo = [n for n in names if force or n in stale or not all(f.is_file() for f in files(project, n))]
     have = [n for n in names if n not in todo]
@@ -281,7 +281,7 @@ def ensure_linear16(project, names: Iterable[str], pds: Optional[PathLike] = Non
                 facts["resized"] = True
         f, s = files(project, n)
         for dst, arr in ((f, np.ascontiguousarray(i16[..., ::-1])), (s, sat.astype(np.uint8) * 255)):
-            tmp = dst.with_name(f"{dst.stem}.tmp{os.getpid()}{dst.suffix}")     # 1.1: whole files only - another
+            tmp = dst.with_name(f"{dst.stem}.tmp{os.getpid()}{dst.suffix}")     # 1.0.1: whole files only - another
             cv2.imwrite(str(tmp), arr)                                           # station run may read this frame
             os.replace(tmp, dst)
         facts["source"] = str(prod)
@@ -292,7 +292,7 @@ def ensure_linear16(project, names: Iterable[str], pds: Optional[PathLike] = Non
         log.info("linear16: %s  saturated %.2f %%, clipped in 8-bit %.2f %%, in 16-bit %.2f %%", n,
                  100 * facts["saturated_share"], 100 * facts["clipped_in_8bit_share"], 100 * facts["clipped_in_16bit_share"])
     if made:
-        try:                                                       # 1.1: another run's entries since this one read it
+        try:                                                       # 1.0.1: another run's entries since this one read it
             now = json.loads(recf.read_text(encoding="utf-8")) if recf.is_file() else {}
         except ValueError:
             now = {}

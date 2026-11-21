@@ -53,7 +53,7 @@ def test_tau_table_and_zenith_scale(tmp_path):
 
 
 def test_sun_distance_in_the_zenith_scale():
-    """1.1: the inverse-square term - (d_ref / d)^2 times the Sun-height and dust terms; perihelion to aphelion 1.45."""
+    """1.0.1: the inverse-square term - (d_ref / d)^2 times the Sun-height and dust terms; perihelion to aphelion 1.45."""
     from rpp import default_config
     from rpp.radiometry import SUN_DISTANCE_REFERENCE_AU, sun_distance_scale, zenith_scale
     from rpp.sun import mars_sun_distance_ls
@@ -67,6 +67,7 @@ def test_sun_distance_in_the_zenith_scale():
     assert sun_distance_scale(peri) / sun_distance_scale(aph) == pytest.approx(1.455, abs=0.01)
     r = default_config()["radiometry"]
     assert r["apply_sun_distance"] is True and r["sun_distance_reference_au"] == pytest.approx(1.5237)
+    assert default_config()["color"]["brightness_gain"] == pytest.approx(1.1)        # 1.0.1: with the distance term
 
 
 def test_quantize_reserves_zero_for_invalid():

@@ -1,4 +1,4 @@
-"""1.1: the landing frames (site 1 drive 52) are placed at the S003D0000 waypoint and kept at Butler."""
+"""1.0.1: the landing frames (site 1 drive 52) are placed at the S003D0000 waypoint and kept at Butler."""
 from rpp import load_waypoints
 from rpp.pipeline import load_settings
 from rpp.sfm.project import select_best_products

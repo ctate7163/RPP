@@ -24,11 +24,11 @@ THE VARIANTS (:data:`VARIANTS`)
 * ``filtered_two_pass``: both.
 * ``delaunay`` / ``filtered_delaunay`` (with ``--colmap EXE``): COLMAP's Delaunay mesher, which uses which cameras saw
   each point (``fused.ply.vis``), over the ``current`` / ``filtered`` cloud.
-* 1.1, ``--cloud NAME=PATH``: a cloud made elsewhere in the same alignment (a ``fused.ply`` or the workspace holding
+* 1.0.1, ``--cloud NAME=PATH``: a cloud made elsewhere in the same alignment (a ``fused.ply`` or the workspace holding
   it), e.g. the station's Navcam and Mastcam-Z 34 mm depth (``rpp dense WORK --station 26_1222 --cameras NZ --zooms 34
   --prepare --stereo --fusion``: ``dense_S026D1222_NZ34``), meshed and scored the same way.
 
-Every variant's report also carries its mesh checks (:func:`rpp.ibr.mesh.mesh_checks`, 1.1): the spike-like
+Every variant's report also carries its mesh checks (:func:`rpp.ibr.mesh.mesh_checks`, 1.0.1): the spike-like
 triangles, the hole-fill sectors and the fill above the skyline.
 
 THE SCORE
@@ -203,7 +203,7 @@ def score_mesh(mesh_dir: PathLike, points: np.ndarray, rings: Sequence[float] = 
             row["median_m"] = round(float(np.median(dm[near])), 4) if near.any() else None
             row["p90_m"] = round(float(np.percentile(dm[near], 90)), 4) if near.any() else None
         out.append(row)
-    chk = (rep.get("fill") or {}).get("checks") or {}             # 1.1: the mesh checks
+    chk = (rep.get("fill") or {}).get("checks") or {}             # 1.0.1: the mesh checks
     return {"rings": out, "tie_points": int(len(P)), "triangles": int(len(F)),
             "agree_all": round(float(np.mean(d <= tau)), 4) if len(P) else None,
             "points_meshed": rep.get("points_meshed"), "surface": (rep.get("surface") or {}).get("method"),
@@ -265,7 +265,7 @@ def compare_station(label: str, root: PathLike, cfg: Optional[Dict[str, Any]] = 
                     clouds: Optional[Dict[str, PathLike]] = None) -> Dict[str, Any]:
     """The variants of one station (module docstring); returns and writes ``compare/<station>_comparison.json`` and
     ``.md``.  ``refuse``: fuse the variants again even when their cloud is there with the same settings.
-    ``clouds``: 1.1, further clouds by name (a fused.ply or its folder), meshed and scored as they are."""
+    ``clouds``: 1.0.1, further clouds by name (a fused.ply or its folder), meshed and scored as they are."""
     from ..ibr.single_sites import load_config
     from .depth_filter import FILTER_DEFAULTS
     cfg = cfg or load_config()
@@ -281,7 +281,7 @@ def compare_station(label: str, root: PathLike, cfg: Optional[Dict[str, Any]] = 
         variants = [v for v in variants if v not in DELAUNAY_VARIANTS]
     variants = ["current"] + [v for v in dict.fromkeys(variants) if v != "current"]     # the reference first
     given: Dict[str, Path] = {}
-    for name, pth in (clouds or {}).items():                     # 1.1: clouds made elsewhere
+    for name, pth in (clouds or {}).items():                     # 1.0.1: clouds made elsewhere
         d = Path(pth)
         d = d.parent if d.suffix.lower() == ".ply" else d
         if not (d / "fused.ply").is_file():
@@ -424,7 +424,7 @@ def main(a) -> int:
         fo["max_range_m"] = {k.upper(): float(v) for k, v in (x.split("=", 1) for x in a.max_range)}
     dirs = set()
     for lab in a.stations:                                       # the block's maps kept until its last station
-        given = dict(x.split("=", 1) for x in (getattr(a, "cloud", None) or []))     # 1.1
+        given = dict(x.split("=", 1) for x in (getattr(a, "cloud", None) or []))     # 1.0.1
         rep = compare_station(lab, root, cfg, variants=a.variants or VARIANTS, colmap_exe=a.colmap,
                               block_cameras=a.block_cameras, terrain=a.terrain, keep_maps=True,
                               filter_options=fo, refuse=a.refuse, clouds=given)

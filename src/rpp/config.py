@@ -36,11 +36,11 @@ _DEFAULTS: Dict[str, Any] = {
         # Floor on mu = sin(solar elevation) in the correction (avoids blow-up
         # near the horizon).
         "zenith_min": 0.2,
-        # 1.1 (Christian, 21 Nov 2026: "apply the sun distance effect using the inverse square effect with the
+        # 1.0.1 (Christian, 21 Nov 2026: "apply the sun distance effect using the inverse square effect with the
         # atmospheric extinction model using tau and zenith scaling ... as a part of the standard processing"): the
         # zenith scale also carries (reference / distance)^2 for the Sun's distance at the image's L_s
         # (rpp.sun.mars_sun_distance_ls: 1.381-1.666 au, sunlight x 1.22 ... 0.84 of that at the reference).  Part
-        # of the tau correction (apply_tau_correction False leaves it out too).  A configuration saved before 1.1
+        # of the tau correction (apply_tau_correction False leaves it out too).  A configuration saved before 1.0.1
         # has no such key and gets this default: its panoramas are made with the distance term.
         "apply_sun_distance": True,
         "sun_distance_reference_au": 1.5237,

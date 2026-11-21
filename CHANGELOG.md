@@ -9,10 +9,16 @@ The development history before 1.0 is in
 [`docs/history/`](https://github.com/ctate7163/rpp/tree/main/docs/history): `CHANGELOG_v0p95-v0p99.md`,
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
-## 1.1.0.dev0 — in development (branch v1p1)
+## 1.0.1.dev0 — in development (branch v1p01)
+- Brightness: `color.brightness_gain` 1.1 on every camera (with the family factors).  The level had been set on
+  blocks imaged near perihelion; the Sun-distance term darkens those by 0.82, so the gain puts them at 0.90 of their
+  1.0 level and the aphelion blocks at 1.31.  A configuration saved before has no gain and gets it; the station
+  frames' cache key includes it.
+- The version is 1.0.1 (branch `v1p01`; called 1.1 for a day).  "1.01" is not a version of its own for Python
+  packaging - it is read as 1.1.
 - Station products follow the radiometric settings: a cached 16-bit frame (`images16/`) made under other settings - or
-  before 1.1, without the Sun's distance - is made again from its PDS product (`rpp.ibr.linear16.radiometry_key`), and
-  a station's stored levels (`tone_levels.json`) are found again.  So an `rpv_process` run of 1.1 remakes every
+  before 1.0.1, without the Sun's distance - is made again from its PDS product (`rpp.ibr.linear16.radiometry_key`), and
+  a station's stored levels (`tone_levels.json`) are found again.  So an `rpv_process` run of 1.0.1 remakes every
   station's source frames with the new brightness; before this a station would have kept its old frames, or mixed old
   and new ones.  The frames and the record are written as whole files (two station runs may share a block's frames).
   The blocks' 8-bit images, features and alignments are not touched.
@@ -29,7 +35,7 @@ The development history before 1.0 is in
 - `rpp dense --cameras NZ --zooms 34`: a station's Navcam and Mastcam-Z 34 mm frames in their own workspace
   (`dense_<station>_NZ34`); `rpp fusion-compare --cloud NAME=PATH` meshes and scores such a cloud beside the block's,
   and every variant reports its spike triangles and hole-fill checks (the Z34 spike test,
-  `rpp_v1p1_z34_spike_test.cmd`).
+  `rpp_v1p01_z34_spike_test.cmd`).
 - The landing frames of sols 1-4 come into Butler Landing: the site keeps the `AUT_` sequences (`SEQUENCE_PREFIXES`), and
   station S001D0052, which the waypoint table does not have, is placed at the S003D0000 waypoint
   (`rpp.waypoints.table.STATION_ALIASES`; the rover did not move until sol 14), with the looser prior of a station

@@ -62,7 +62,7 @@ STATION_FUSION_OPTIONS = {"min_num_pixels": 2}
 PATCH_MATCH_SOURCES = 12
 COLMAP_SOURCES = 20                 # what a workspace made by COLMAP's undistorter has (and every workspace before 1.0)
 STATION_STEREO_FAST = {"window_step": 2}
-# 1.1 (Christian, 21 Nov 2026, Van Zyl: "there is still a wrong large rounded hill behind the rover"): THE DEPTH RANGE.
+# 1.0.1 (Christian, 21 Nov 2026, Van Zyl: "there is still a wrong large rounded hill behind the rover"): THE DEPTH RANGE.
 # Patch-match searches each frame's depth between the nearest and farthest of its tie points (+-25 %) unless the
 # options name a range.  The Van Zyl frame that looks behind the rover (NCAM03052 0671564560) sees the crater rim and
 # has tie points out to 1.9 km: its search ran from 1.2 m to 2.3 km, the random starts were nearly all hundreds of
@@ -133,7 +133,7 @@ def subset_images(project: SfmProject, station: Optional[str] = None, families: 
         rows = [r for r in rows if r.get("sequence") in set(sequences)]
     if scale is not None:
         rows = [r for r in rows if abs(float(r.get("downsample_scale") or 1.0) - float(scale)) < 1e-6]
-    if zooms:                                                    # 1.1: Mastcam-Z frames of these zooms only
+    if zooms:                                                    # 1.0.1: Mastcam-Z frames of these zooms only
         keep = {int(z) for z in zooms}
         rows = [r for r in rows if not str(r["name"]).upper().startswith("Z") or zcam_zoom(r["name"]) in keep]
     return sorted(r["name"] for r in rows)
@@ -570,7 +570,7 @@ def set_options(opts: Any, values: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _terrain_mask(ws: Path, rel: str, shape) -> np.ndarray:
-    """1.1: True where a frame's map should have depth - its fusion mask (no rover, no sky) or its rover mask, else
+    """1.0.1: True where a frame's map should have depth - its fusion mask (no rover, no sky) or its rover mask, else
     the frame's picture (the black border of an undistorted frame is not terrain)."""
     from PIL import Image
     for d in (SKY_MASK_DIR, "masks"):
@@ -590,7 +590,7 @@ def _terrain_mask(ws: Path, rel: str, shape) -> np.ndarray:
 
 
 def check_depth_maps(ws: PathLike, kind: str = "geometric", force: bool = False) -> Dict[str, Any]:
-    """1.1: the share of each frame's terrain (:func:`_terrain_mask`) that its depth map covers, and the frames whose
+    """1.0.1: the share of each frame's terrain (:func:`_terrain_mask`) that its depth map covers, and the frames whose
     map failed (:data:`DEPTH_CHECK_MIN_SHARE`, :data:`DEPTH_CHECK_REL`).  Returns {"shares": {image: share},
     "median": m, "failed": [images]}; kept in ``stereo/rpp_depth_check.json`` while the maps stay the same."""
     ws = Path(ws)
@@ -628,7 +628,7 @@ def check_depth_maps(ws: PathLike, kind: str = "geometric", force: bool = False)
 
 
 def clear_depth_maps(ws: PathLike, names: Sequence[str]) -> int:
-    """1.1: delete the patch-match outputs of these frames (both kinds; depth, normal, consistency) so that the next
+    """1.0.1: delete the patch-match outputs of these frames (both kinds; depth, normal, consistency) so that the next
     patch-match makes them again - COLMAP skips a frame whose maps exist.  Returns the files deleted."""
     st = Path(ws) / "stereo"
     k = 0
@@ -643,7 +643,7 @@ def clear_depth_maps(ws: PathLike, names: Sequence[str]) -> int:
 
 
 def depth_repairs(ws: PathLike) -> Dict[str, Any]:
-    """1.1: the frames already made again (``stereo/rpp_depth_repair.json``) - each is repaired once."""
+    """1.0.1: the frames already made again (``stereo/rpp_depth_repair.json``) - each is repaired once."""
     f = Path(ws) / "stereo" / DEPTH_REPAIR_FILE
     try:
         return json.loads(f.read_text(encoding="utf-8")) if f.is_file() else {}
@@ -652,7 +652,7 @@ def depth_repairs(ws: PathLike) -> Dict[str, Any]:
 
 
 def frames_to_repair(ws: PathLike, kind: str = "geometric") -> List[str]:
-    """1.1: the frames whose depth map failed and that were not made again yet."""
+    """1.0.1: the frames whose depth map failed and that were not made again yet."""
     done = depth_repairs(ws)
     return [n for n in check_depth_maps(ws, kind).get("failed", []) if n not in done]
 
@@ -695,7 +695,7 @@ def run_dense(project: SfmProject, workspace: Optional[PathLike] = None, steps=(
         pycolmap.patch_match_stereo(str(ws), "COLMAP", options=po)
         out["steps"]["stereo"] = {"seconds": round(time.time() - t0, 1), "geom_consistency": bool(geom_consistency),
                                   "options": so, "old_maps": state}
-        # 1.1: a frame whose depth map failed is made again once, with STATION_DEPTH_RANGE (its tie points' range
+        # 1.0.1: a frame whose depth map failed is made again once, with STATION_DEPTH_RANGE (its tie points' range
         # was the trouble at Van Zyl); its other options stay the workspace's
         kind = "geometric" if geom_consistency else "photometric"
         bad = frames_to_repair(ws, kind)
@@ -875,7 +875,7 @@ def read_colmap_array(path: PathLike):
     raw = Path(path).read_bytes()
     k, n = 0, 0
     while n < 3:
-        if k >= min(len(raw), 64):                               # 1.1: a truncated file looped here for ever
+        if k >= min(len(raw), 64):                               # 1.0.1: a truncated file looped here for ever
             raise ValueError(f"not a COLMAP dense map: {path}")
         if raw[k:k + 1] == b"&":
             n += 1

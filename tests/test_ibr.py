@@ -600,7 +600,7 @@ def test_dense_stereo_goes_to_the_pipelines_gpu_python(tmp_path, monkeypatch):
     from rpp.sfm.dense import (PATCH_MATCH_SOURCES, STATION_FUSION_OPTIONS, STATION_FUSION_STRICT, STATION_STEREO_FAST,
                                STATION_STEREO_OPTIONS, STEREO_RECORD)
     from rpp.sfm.dense import STATION_DEPTH_RANGE
-    fast = {**STATION_STEREO_OPTIONS, **STATION_STEREO_FAST, **STATION_DEPTH_RANGE}   # 1.1: + the depth range           # 1.0: new maps with the sparser window,
+    fast = {**STATION_STEREO_OPTIONS, **STATION_STEREO_FAST, **STATION_DEPTH_RANGE}   # 1.0.1: + the depth range           # 1.0: new maps with the sparser window,
     assert kw["stereo_options"] == fast and kw["fusion_options"] == STATION_FUSION_OPTIONS
     assert kw["sources"] == PATCH_MATCH_SOURCES and kw["fusion_strict"] is None    # 12 sources; one fusion by default
     calls.clear()
@@ -2789,7 +2789,7 @@ def test_context_frames_are_masked_fill_only_and_stay_off_the_rover(tmp_path):
                                                                    "NRF_0052_0671561864_884RAD_N0032016NCAM00301_0A0295J01.png"]
     assert cfg["stations"]["Sol0052"]["context"][2:] == ["N?F_0049_0671300154_616RAD_N0031940NCAM00302_*.png",   # 1.0: sol 49,
                                                          "N?F_0049_0671302488_426RAD_N0031950NCAM03049_*.png",  # not sol 33
-                                                         "N?F_0049_0671302876_881RAD_N0031950NCAM02049_*.png"]  # 1.1: behind the rover
+                                                         "N?F_0049_0671302876_881RAD_N0031950NCAM02049_*.png"]  # 1.0.1: behind the rover
 
 
 def test_geometry_panoramas_masked_black_and_image_copies(tmp_path):

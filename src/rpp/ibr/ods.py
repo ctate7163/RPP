@@ -2148,7 +2148,7 @@ def _radiance_record(frames: Sequence[Dict[str, Any]], exposure16: Optional[floa
     the 16-bit panorama turns back into radiance.  A frame's 16-bit value is
         radiance x white balance x brightness / zenith scale x scale_rad_to_int16
     with the block's settings (the same at every station) and the frame's own zenith scale (the sun's height, the
-    opacity and, since 1.1, the Sun's distance, :func:`rpp.radiometry.zenith_scale`; one 360 is taken within minutes, so it hardly varies in a station).
+    opacity and, since 1.0.1, the Sun's distance, :func:`rpp.radiometry.zenith_scale`; one 360 is taken within minutes, so it hardly varies in a station).
     The panorama multiplies by exposure16 and by each frame's blending gain (median 1)."""
     if not frames or exposure16 is None:
         return None
@@ -2363,7 +2363,7 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
         want = [n for n in (list(images) if images else [n for n in station.images if n[:1].upper() in set(families.upper())])
                 if n in by and n not in set(ctx_names)]
         lin_rep = ensure_linear16(project, want + fill_names, pds=pds)
-        from .linear16 import reset_stale_levels                # 1.1: levels measured under other radiometry go
+        from .linear16 import reset_stale_levels                # 1.0.1: levels measured under other radiometry go
         if reset_stale_levels(tone_levels_file, lin_rep.get("radiometry_key")):
             log.info("ods: %s held levels of other radiometric settings - found again", tone_levels_file)
         lost = [n for n in fill_names if n in lin_rep["missing"]]

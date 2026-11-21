@@ -41,7 +41,7 @@ SUN_DISTANCE_REFERENCE_AU = 1.5237      # Mars' mean distance from the Sun (its 
 
 
 def sun_distance_scale(d_au: float, d_ref_au: float = SUN_DISTANCE_REFERENCE_AU) -> float:
-    """1.1: the sunlight at the top of the atmosphere at ``d_au`` from the Sun, relative to ``d_ref_au``:
+    """1.0.1: the sunlight at the top of the atmosphere at ``d_au`` from the Sun, relative to ``d_ref_au``:
     (d_ref / d)^2.  Mars moves between 1.381 au (L_s 251) and 1.666 au (L_s 71): 1.22 to 0.84, a factor 1.45."""
     return float((float(d_ref_au) / float(d_au)) ** 2)
 
@@ -54,7 +54,7 @@ def zenith_scale(solar_elevation_deg: float, tau: float, tau_ref: float, mu_min:
     Dividing radiance by ``s`` normalizes scene brightness to an overhead Sun at the reference opacity and at the
     reference distance from the Sun: the three first-order terms of the sunlight reaching a level surface -
 
-    * (d_ref / d)^2: the inverse-square law for the Sun's distance ``d_au`` (1.1; left out when ``d_au`` is None);
+    * (d_ref / d)^2: the inverse-square law for the Sun's distance ``d_au`` (1.0.1; left out when ``d_au`` is None);
     * mu: the Sun's height (the cosine of the incidence angle on level ground);
     * exp(-(tau - tau_ref) / (6 mu)): the dust.  The factor 6 is the empirical attenuation of the *total*
       (direct + diffuse) surface irradiance with optical depth - the direct beam alone falls as exp(-tau / mu), but

@@ -275,7 +275,7 @@ class RPPImage:
                 extra = offset_ned
                 src = f"waypoint site {self.site} drive 0 + label ORIGIN_OFFSET_VECTOR"
             elif station_alias(self.site, self.drive) and not has_station(waypoints, self.site, self.drive):
-                a = station_alias(self.site, self.drive)    # 1.1: the same rover position under another station
+                a = station_alias(self.site, self.drive)    # 1.0.1: the same rover position under another station
                 src = f"waypoint site {a[0]} drive {a[1]} (station alias of site {self.site} drive {self.drive})"
             else:
                 src = f"waypoint site {self.site} drive {self.drive} (exact)"
@@ -311,7 +311,7 @@ class RPPImage:
                 raise ValueError("tau correction needs SOLAR_LONGITUDE and SOLAR_ELEVATION in the label")
             table = resolve_resource(r["tau_table"], data_dir())
             self.tau_estimated = radiometry.interpolate_table(table, self.L_s)
-            if r.get("apply_sun_distance", True):                # 1.1: the inverse-square term, from the orbit at L_s
+            if r.get("apply_sun_distance", True):                # 1.0.1: the inverse-square term, from the orbit at L_s
                 from .sun import mars_sun_distance_ls            # (not SPICE: the same on every machine)
                 d_ref = float(r.get("sun_distance_reference_au") or radiometry.SUN_DISTANCE_REFERENCE_AU)
                 self.sun_distance_au = float(mars_sun_distance_ls(self.L_s))
@@ -573,7 +573,7 @@ class RPPImage:
             # 0.95.0 (Christian, 27 Oct): the per-image sun facts the paper-3 work needs (rpp.sun)
             **_sun_facts(self.L_s, self.solar_az, self.solar_el, label_get(L, "START_TIME", default="")),
             "tau_estimated": self.tau_estimated, "tau_reference": self.tau_ref,
-            "scale_zenith": self.scale_zenith, "scale_sun_distance": self.scale_sun_distance,   # 1.1: in scale_zenith
+            "scale_zenith": self.scale_zenith, "scale_sun_distance": self.scale_sun_distance,   # 1.0.1: in scale_zenith
             "white_balance": self.white_balance.tolist(),
             "brightness": self.brightness, "brightness_gain": self.brightness_gain, "lmst_h": self.lmst_h, "saturated_fraction": self.saturated_fraction,
             "radiance_scaling_factor": self.scale_dn_to_rad, "radiance_offset": self.offset_dn_to_rad,

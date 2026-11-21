@@ -1,4 +1,4 @@
-"""1.1: the hole fill bounded by what was seen, the mesh checks, and the depth-map check and repair bookkeeping."""
+"""1.0.1: the hole fill bounded by what was seen, the mesh checks, and the depth-map check and repair bookkeeping."""
 import json
 
 import numpy as np

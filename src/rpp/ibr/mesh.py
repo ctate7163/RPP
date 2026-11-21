@@ -909,7 +909,7 @@ FILL_MIN_COVER = 0.6              # a cell counts as covered when its triangles'
 FILL_ROVER_REF_RADIUS_M = 5.0    # rover_keep_m: the ground's height from the triangles within this of the axis, off the footprint
 
 
-# 1.1 (Christian, 21 Nov 2026, on Van Zyl, Rockytop, Skinner Ridge, Wildcat Ridge and Chal Rocks: "a wrong large rounded
+# 1.0.1 (Christian, 21 Nov 2026, on Van Zyl, Rockytop, Skinner Ridge, Wildcat Ridge and Chal Rocks: "a wrong large rounded
 # hill behind the rover", "mesh floaters and spikes" - "How can we prevent these sorts of misshapen mesh artifacts?"):
 # THE FILL MUST NOT CONTRADICT WHAT WAS SEEN.  The dark shapes in the normal maps were the hole fill: a smooth surface
 # over every cell without measured surface, interpolated from the cells around it.  Over a wide hole the cubic rose
@@ -939,7 +939,7 @@ FILL_VISIBLE_TOL_DEG = 0.05       # a point counts as seen from the pivot when i
 
 
 def harmonic_hole_fill(hn: np.ndarray, covered: np.ndarray, edges: np.ndarray, na: int) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """1.1: the fill's nodes away from measured surface by harmonic (membrane) interpolation on the polar grid: each
+    """1.0.1: the fill's nodes away from measured surface by harmonic (membrane) interpolation on the polar grid: each
     such node the weighted mean of its four neighbors (weights 1/dr^2 across rings, 1/(r dtheta)^2 along them), the
     nodes that touch a covered cell held at their interpolated height.  A harmonic surface lies between the highest
     and lowest of its boundary (the maximum principle): no dome over a wide hole (Van Zyl), no climb past its rim.
@@ -994,7 +994,7 @@ def harmonic_hole_fill(hn: np.ndarray, covered: np.ndarray, edges: np.ndarray, n
     return out, {"nodes": n_u, "max_change_m": round(float(np.max(np.abs(sol - hn[ii, jj]))), 2)}
 
 
-# 1.1: THE MESH CHECKS (mesh_report.json "checks", and a warning in the log for each): the share of the terrain's area
+# 1.0.1: THE MESH CHECKS (mesh_report.json "checks", and a warning in the log for each): the share of the terrain's area
 # ground that the measured surface leaves to fill in each CHECK_SECTOR_DEG sector from CHECK_FROM_M to CHECK_TO_M
 # (over CHECK_FILL_SHARE: no usable depth there - Van Zyl behind the rover; or a ridge hides it); fill above the measured skyline; steep long measured triangles (spikes: steeper than
 # CHECK_SPIKE_STEEP from vertical... |normal . up| < CHECK_SPIKE_COS, CHECK_SPIKE_TALL_M tall, an edge over
@@ -1010,7 +1010,7 @@ CHECK_SPIKE_EDGE = 4.0
 
 def mesh_checks(V: np.ndarray, F: np.ndarray, n_measured: int, n_terrain: int, pivot: Sequence[float],
                 up: Sequence[float], north: Optional[Sequence[float]] = None, radius_m: float = DEFAULT_RADIUS_M) -> Dict[str, Any]:
-    """1.1: the checks of a station mesh (see CHECK_SECTOR_DEG): ``F[:n_measured]`` the measured terrain,
+    """1.0.1: the checks of a station mesh (see CHECK_SECTOR_DEG): ``F[:n_measured]`` the measured terrain,
     ``F[n_measured:n_terrain]`` its fill.  Azimuths from ``north`` (else from the block's +y)."""
     P = np.asarray(pivot, float)
     u = np.asarray(up, float) / np.linalg.norm(up)
@@ -1077,7 +1077,7 @@ def mesh_checks(V: np.ndarray, F: np.ndarray, n_measured: int, n_terrain: int, p
 
 def fill_height_bounds(r_m: np.ndarray, az_cell: np.ndarray, h_m: np.ndarray, hp: float, edges: np.ndarray, na: int,
                        med: np.ndarray, covered: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """1.1: the upper bounds of the fill's node heights above the plane (``(len(edges), na)``; see FILL_SEEN_RULES).
+    """1.0.1: the upper bounds of the fill's node heights above the plane (``(len(edges), na)``; see FILL_SEEN_RULES).
     ``r_m``, ``az_cell``, ``h_m``: the measured triangles' horizontal range, azimuth cell and height above the plane;
     ``hp``: the pivot's height above the plane; ``med`` / ``covered``: the covered cells' fill heights (rings x na).
     Returns (bounds, {"rim", "sight", "sky"}: each rule's bound alone, for the report)."""
@@ -1257,7 +1257,7 @@ def fill_terrain(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], up: Seque
     else:
         hn = np.zeros_like(nx)                                   # no terrain at all: the plane
     hn[0, :] = np.mean(hn[0, :])                                 # the axis is one point
-    if FILL_SEEN_RULES and len(F) and ok.any() and covered.sum() >= 3:      # 1.1: what was seen bounds the fill
+    if FILL_SEEN_RULES and len(F) and ok.any() and covered.sum() >= 3:      # 1.0.1: what was seen bounds the fill
         hn, hrep = harmonic_hole_fill(hn, covered, edges, na)
         rep["fill_harmonic"] = hrep
         hp = float(height_above_plane(P[None, :], plane, up)[0])
@@ -1445,7 +1445,7 @@ def build_station_mesh(points: np.ndarray, pivot: Sequence[float], out_dir: Path
         log.info("mesh: terrain fill - %d of %d cells had no surface (%d triangles); %d triangles under the rover replaced",
                  fill_rep["filled"], fill_rep["cells"], fill_rep["triangles"], fill_rep["under_rover_triangles_removed"])
         terrain_tris = [0, int(fill_rep.get("measured_triangles", len(F)))]
-        try:                                                    # 1.1: the mesh checks
+        try:                                                    # 1.0.1: the mesh checks
             chk = mesh_checks(V, F, int(fill_rep.get("measured_triangles", len(F))), int(len(F)), pivot, up,
                               north=(station or {}).get("north_block"), radius_m=radius_m)
             fill_rep["checks"] = chk

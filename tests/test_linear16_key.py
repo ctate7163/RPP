@@ -1,4 +1,4 @@
-"""1.1: the 16-bit frame cache and a station's stored levels follow the radiometric settings."""
+"""1.0.1: the 16-bit frame cache and a station's stored levels follow the radiometric settings."""
 import json
 from types import SimpleNamespace
 
@@ -34,7 +34,7 @@ def test_frames_cached_under_other_radiometry_are_made_again(tmp_path):
     rec = json.loads((proj.root / "images16" / "linear16.json").read_text())
     assert rec[name]["radiometry_key"] == r2["radiometry_key"]
     assert not list((proj.root / "images16").glob("*.tmp*"))
-    rec[name].pop("radiometry_key")                              # a cache made before 1.1 has no key: stale
+    rec[name].pop("radiometry_key")                              # a cache made before 1.0.1 has no key: stale
     (proj.root / "images16" / "linear16.json").write_text(json.dumps(rec))
     assert L.ensure_linear16(proj, [name], pds=pds, make=make)["remade_stale"] == 1
 

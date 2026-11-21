@@ -37,7 +37,7 @@ WAYPOINTS_FILE = "M20_waypoints.json"
 MISSIONS = {"m2020": (WAYPOINTS_URL, WAYPOINTS_FILE),
             "msl": ("https://mars.nasa.gov/mmgis-maps/MSL/Layers/json/MSL_waypoints.json", "MSL_waypoints.json")}
 MARS_RADIUS_M = 3396190.0          # IAU 2000 Mars sphere used by the M2020 maps
-# 1.1 (Christian, 21 Nov 2026: "Why did the z34 images before sol 11 not run?"): stations the waypoint table does not
+# 1.0.1 (Christian, 21 Nov 2026: "Why did the z34 images before sol 11 not run?"): stations the waypoint table does not
 # have, placed at the waypoint of the same rover position.  The landing frames of sols 1-12 are site 1 drive 52; the
 # table starts with site 3 drive 0 (sol 13), and the rover did not move until sol 14.  A frame placed through an
 # alias gets the looser prior of a station without its own waypoint (``rpp.sfm.reconstruction.is_unsurveyed``).
@@ -168,12 +168,12 @@ def waypoint_for_site_drive(data: Dict[str, Any], site: int, drive: int,
        (the legacy function returned the feature in case 1 but its
        'properties' in case 2).
 
-    A station of :data:`STATION_ALIASES` that the table lacks gets the waypoint of its alias (1.1).
+    A station of :data:`STATION_ALIASES` that the table lacks gets the waypoint of its alias (1.0.1).
     """
     feats = [(i, f) for i, f in enumerate(data.get("features", []))
              if _int(_props(f), "site") == site]
     if not any(_int(_props(f), "drive") == drive for _, f in feats):
-        alias = station_alias(site, drive)          # 1.1: a station the table lacks, at its alias's waypoint
+        alias = station_alias(site, drive)          # 1.0.1: a station the table lacks, at its alias's waypoint
         if alias is not None and alias != (site, drive):
             got = waypoint_for_site_drive(data, alias[0], alias[1], exact=True)
             if got is not None:

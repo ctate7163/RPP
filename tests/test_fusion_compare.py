@@ -138,7 +138,7 @@ def test_the_comparison_runs_on_a_listed_station(tmp_path, monkeypatch):
 
 
 def test_a_given_cloud_is_meshed_and_scored(tmp_path, monkeypatch):
-    """1.1: --cloud NAME=PATH - a cloud made elsewhere (the Navcam + Z34 station depth) is meshed and scored with the
+    """1.0.1: --cloud NAME=PATH - a cloud made elsewhere (the Navcam + Z34 station depth) is meshed and scored with the
     others, and its mesh checks (spikes) are in the report and the table."""
     import shutil
     import subprocess
