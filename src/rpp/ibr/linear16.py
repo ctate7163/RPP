@@ -89,6 +89,7 @@ def linear16_of_product(path: PathLike, config: Dict[str, Any]) -> Tuple[np.ndar
     i16 = im.image_int16
     facts = {"product": Path(path).name, "white_balance": [float(v) for v in im.white_balance],
              "brightness": float(im.brightness), "scale_zenith": None if im.scale_zenith is None else float(im.scale_zenith),
+             "scale_sun_distance": getattr(im, "scale_sun_distance", None),
              "scale_rad_to_int16": float(cfg["color"]["scale_rad_to_int16"]),
              "to_radiance_divide_by": [float(v) for v in wb * float(cfg["color"]["scale_rad_to_int16"])],
              "saturated_share": float(sat.sum() / max(1, valid.sum())),

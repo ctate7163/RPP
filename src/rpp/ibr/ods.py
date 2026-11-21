@@ -2147,8 +2147,8 @@ def _radiance_record(frames: Sequence[Dict[str, Any]], exposure16: Optional[floa
     """0.98.0 (Christian, 14 Nov 2026: "The 16 bit images should have a universal scale to radiance"): how a value of
     the 16-bit panorama turns back into radiance.  A frame's 16-bit value is
         radiance x white balance x brightness / zenith scale x scale_rad_to_int16
-    with the block's settings (the same at every station) and the frame's own zenith scale (the sun's height and the
-    opacity, :func:`rpp.radiometry.zenith_scale`; one 360 is taken within minutes, so it hardly varies in a station).
+    with the block's settings (the same at every station) and the frame's own zenith scale (the sun's height, the
+    opacity and, since 1.1, the Sun's distance, :func:`rpp.radiometry.zenith_scale`; one 360 is taken within minutes, so it hardly varies in a station).
     The panorama multiplies by exposure16 and by each frame's blending gain (median 1)."""
     if not frames or exposure16 is None:
         return None

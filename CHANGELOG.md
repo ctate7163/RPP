@@ -10,6 +10,12 @@ The development history before 1.0 is in
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
 ## 1.1.0.dev0 — in development (branch v1p1)
+- Radiometry: the zenith scale carries the Sun's distance, s = (d_ref/d)² μ exp[−(τ − τ_ref)/(6μ)] with d from the
+  orbit at the image's L_s and d_ref = 1.5237 au (`radiometry.apply_sun_distance`, on by default;
+  `rpp.radiometry.sun_distance_scale`).  Sunlight varies by a factor 1.45 between perihelion and aphelion; ten station
+  panoramas' ground levels differed by 1.77 before and 1.22 with it.  The manifest records `scale_sun_distance`.
+  Images come out up to 22 % darker (L_s 251) or 19 % brighter (L_s 71) than with 1.0; a block processed before keeps
+  its 8-bit images until it is processed again, its station panoramas get the term (docs/methods.md, section 4).
 - RPV: the page tells a PC, a phone or a headset apart (`?device=` overrides it) and shows that device's controls in
   the welcome view.  On a phone the tilt moves the eye about the pivot (8 cm at 15 degrees, slowly re-centered;
   `?tilt=-1` reverses it, `?tilt=0` turns it off), two fingers pinch the zoom, and while driving one finger drags the

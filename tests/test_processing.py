@@ -52,6 +52,23 @@ def test_tau_table_and_zenith_scale(tmp_path):
     assert zenith_scale(2.0, 0.3, 0.3, 0.2)[1] == 0.2                # floor near the horizon
 
 
+def test_sun_distance_in_the_zenith_scale():
+    """1.1: the inverse-square term - (d_ref / d)^2 times the Sun-height and dust terms; perihelion to aphelion 1.45."""
+    from rpp import default_config
+    from rpp.radiometry import SUN_DISTANCE_REFERENCE_AU, sun_distance_scale, zenith_scale
+    from rpp.sun import mars_sun_distance_ls
+    assert sun_distance_scale(SUN_DISTANCE_REFERENCE_AU) == pytest.approx(1.0)
+    assert sun_distance_scale(2 * SUN_DISTANCE_REFERENCE_AU) == pytest.approx(0.25)
+    s0, _ = zenith_scale(30.0, 0.9, 0.3, 0.2)
+    s1, mu = zenith_scale(30.0, 0.9, 0.3, 0.2, d_au=1.381)
+    assert s1 == pytest.approx(s0 * (1.5237 / 1.381) ** 2) and mu == pytest.approx(0.5)
+    peri, aph = mars_sun_distance_ls(251.0), mars_sun_distance_ls(71.0)
+    assert peri == pytest.approx(1.381, abs=0.003) and aph == pytest.approx(1.666, abs=0.003)
+    assert sun_distance_scale(peri) / sun_distance_scale(aph) == pytest.approx(1.455, abs=0.01)
+    r = default_config()["radiometry"]
+    assert r["apply_sun_distance"] is True and r["sun_distance_reference_au"] == pytest.approx(1.5237)
+
+
 def test_quantize_reserves_zero_for_invalid():
     from rpp import default_config
     from rpp.radiometry import quantize
