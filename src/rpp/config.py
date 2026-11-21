@@ -76,6 +76,13 @@ _DEFAULTS: Dict[str, Any] = {
         # Z = Mastcam-Z).  0.99.22: the ecams 8 % brighter than before, at Mastcam-Z's level (N 0.990 x 1.08,
         # F/R 1.104 x 1.079); to 0.99.21 it was {"N": 0.9} with the level in the balances
         "brightness_by_family": {"N": 1.069, "F": 1.191, "R": 1.191, "Z": 1.0},
+        # 1.0.1 (Christian, 21 Nov 2026: "I set the brightness scale in order to not make rockytop and bright angel
+        # too bright. Now that [we] know about the x0.82 effect, we can increase the scale by about x1.1"): one gain
+        # on every camera, with the family factors.  The level was set on blocks imaged near perihelion, which the
+        # Sun-distance term (radiometry.apply_sun_distance) now darkens by 0.82; with the gain they end at 0.90 of
+        # their 1.0 level and the aphelion blocks (Belva, Seitah, Chal Rocks) at 1.31.  Its own key, not
+        # scale_rad_to_int16: a configuration saved before 1.0.1 holds that scale and no gain, so it gets this one.
+        "brightness_gain": 1.1,
         "scale_rad_to_int16": 2e5,
         "scale_int8_to_int16": 64,
         "offset_int8_to_int16": 0.0,
