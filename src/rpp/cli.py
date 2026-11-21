@@ -169,6 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
                    "beyond 20 m dropped by the filter")
     p.add_argument("--keep-maps", action="store_true", help="keep the filtered depth maps (a few GB a block)")
     p.add_argument("--refuse", action="store_true", help="filter and fuse again even when the variants are there")
+    p.add_argument("--cloud", nargs="+", default=None, metavar="NAME=PATH",
+                   help="1.1: further clouds of the same alignment, meshed and scored as they are (a fused.ply or its "
+                        "workspace), e.g. z34=D:\\...\\colmap\\dense_S026D1222_NZ34")
     p = sub.add_parser("dense", help="the COLMAP dense reconstruction of a finished block - the workspace "
                        "<project>/dense (images undistorted from the native-pixel model, the rover masks for the "
                        "fusion), patch-match stereo, fusion, a mesh; dense_reconstruct.bat next to open_in_colmap.bat "
@@ -194,7 +197,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-depth", type=float, default=None, help="--maps: depth beyond this (m) is left out (default 100)")
     p.add_argument("--station", default=None, help="only the frames of this station (S026D0630, 26_630, sol:461): "
                    "a sub-model of them, its own workspace <project>/dense_<station>[_<sequence>]")
-    p.add_argument("--cameras", default="N", help="--station: the camera families (default N)")
+    p.add_argument("--cameras", default="N", help="--station: the camera families (default N; NZ: Navcam and "
+                   "Mastcam-Z - the workspace then dense_<station>_NZ[<zooms>])")
+    p.add_argument("--zooms", nargs="+", type=int, default=None, metavar="MM",
+                   help="1.1, with Z in --cameras: only the Mastcam-Z frames of these zooms (e.g. 34)")
     p.add_argument("--sequence", nargs="+", default=None, help="--station: only these sequences (NCAM03461 ...)")
     p.add_argument("--nearby-m", type=float, default=None, metavar="M",
                    help="0.97.0, with --station: also the frames of the block's other stations within M meters (they "
@@ -942,11 +948,15 @@ def cmd_dense(a: argparse.Namespace) -> int:
               + (f"; {len(stub[1])} of them are the station's own" if stub else ""))
     elif getattr(a, "station", None) or getattr(a, "images", None):
         subset = subset_images(proj, station=a.station, families=a.cameras, sequences=a.sequence, names=a.images,
-                               scale=a.scale)
+                               scale=a.scale, zooms=getattr(a, "zooms", None))
         if not subset:
             print(f"dense: no frames for --station {a.station} --cameras {a.cameras} --sequence {a.sequence}", file=sys.stderr)
             return 2
         ws = proj_dir / subset_label(a.station, a.sequence, a.images)
+        fams = "".join(sorted(set((a.cameras or "N").upper())))
+        if a.station and not a.images and fams != "N":           # 1.1: other families, their own workspace
+            zs = "".join(str(z) for z in sorted(set(getattr(a, "zooms", None) or []))) if "Z" in fams else ""
+            ws = ws.with_name(f"{ws.name}_{fams}{zs}")
         if getattr(a, "nearby_m", None) and a.station:          # 0.97.0: the neighbors' frames, for the ground here
             from .sfm.dense import nearby_station_images
             nb = nearby_station_images(proj, a.station, a.nearby_m, families=a.cameras, scale=a.scale)

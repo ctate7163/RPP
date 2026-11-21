@@ -110,7 +110,7 @@ def native_model_dir(project: SfmProject) -> Path:
 
 def subset_images(project: SfmProject, station: Optional[str] = None, families: str = "N",
                   sequences: Optional[Sequence[str]] = None, names: Optional[Sequence[str]] = None,
-                  scale: Optional[float] = None) -> List[str]:
+                  scale: Optional[float] = None, zooms: Optional[Sequence[int]] = None) -> List[str]:
     """The image names of a dense subset (0.96.0, Christian 9 Nov: "test the 3d meshing, reprojection and stereoscopic
     pipeline on one med res navcam sequence at sol 461"): the frames of ``station`` (S026D0630, 26_630, sol:461)
     whose camera family is in ``families``, of ``sequences`` (NCAM03461 ...) if given, at the downsample ``scale``
@@ -133,7 +133,18 @@ def subset_images(project: SfmProject, station: Optional[str] = None, families: 
         rows = [r for r in rows if r.get("sequence") in set(sequences)]
     if scale is not None:
         rows = [r for r in rows if abs(float(r.get("downsample_scale") or 1.0) - float(scale)) < 1e-6]
+    if zooms:                                                    # 1.1: Mastcam-Z frames of these zooms only
+        keep = {int(z) for z in zooms}
+        rows = [r for r in rows if not str(r["name"]).upper().startswith("Z") or zcam_zoom(r["name"]) in keep]
     return sorted(r["name"] for r in rows)
+
+
+def zcam_zoom(name: str) -> Optional[int]:
+    """The Mastcam-Z zoom (focal length, mm) in a product name: the three digits after the sequence
+    (``..._N0261222ZCAM07101_0340LMA01`` -> 34; ``..._AUT_04096_034085A01`` -> 34)."""
+    import re
+    m = re.search(r"_(\d{3})\d[A-Z0-9]{2}[A-Z0-9]\d{2}(?:\.[A-Za-z]+)?$", str(name).upper())
+    return int(m.group(1)) if m else None
 
 
 def nearby_station_images(project: SfmProject, station: str, radius_m: float, families: str = "N",

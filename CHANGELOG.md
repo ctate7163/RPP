@@ -10,6 +10,14 @@ The development history before 1.0 is in
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
 ## 1.1.0.dev0 — in development (branch v1p1)
+- RPV: the page tells a PC, a phone or a headset apart (`?device=` overrides it) and shows that device's controls in
+  the welcome view.  On a phone the tilt moves the eye about the pivot (8 cm at 15 degrees, slowly re-centered;
+  `?tilt=-1` reverses it, `?tilt=0` turns it off), two fingers pinch the zoom, and while driving one finger drags the
+  rover; the buttons are larger.  A headset's browser shows the VR button and the controller list before VR.
+- `rpp dense --cameras NZ --zooms 34`: a station's Navcam and Mastcam-Z 34 mm frames in their own workspace
+  (`dense_<station>_NZ34`); `rpp fusion-compare --cloud NAME=PATH` meshes and scores such a cloud beside the block's,
+  and every variant reports its spike triangles and hole-fill checks (the Z34 spike test,
+  `rpp_v1p1_z34_spike_test.cmd`).
 - The landing frames of sols 1-4 come into Butler Landing: the site keeps the `AUT_` sequences (`SEQUENCE_PREFIXES`), and
   station S001D0052, which the waypoint table does not have, is placed at the S003D0000 waypoint
   (`rpp.waypoints.table.STATION_ALIASES`; the rover did not move until sol 14), with the looser prior of a station

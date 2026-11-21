@@ -135,3 +135,47 @@ def test_the_comparison_runs_on_a_listed_station(tmp_path, monkeypatch):
         assert (ws / "compare" / v / "fused.ply").is_file()
     again = FC.compare_station("S", tmp_path, cfg={"stations": {}})              # cached: nothing fused again
     assert again["variants"]["filtered"]["verdict"] == "not worse"
+
+
+def test_a_given_cloud_is_meshed_and_scored(tmp_path, monkeypatch):
+    """1.1: --cloud NAME=PATH - a cloud made elsewhere (the Navcam + Z34 station depth) is meshed and scored with the
+    others, and its mesh checks (spikes) are in the report and the table."""
+    import shutil
+    import subprocess
+    import test_ibr as T
+    from rpp.sfm import fusion_compare as FC
+    T.test_dense_subset_prepare_and_fusion_write_fused_ply(tmp_path, monkeypatch)
+    ws = next(tmp_path.rglob("dense_S003D0010"))
+    z = tmp_path / "dense_S003D0010_NZ34"
+    z.mkdir()
+    shutil.copyfile(ws / "fused.ply", z / "fused.ply")
+    monkeypatch.setattr(FC, "_mesh_argv", lambda *a, **k: ["mesh", "W", "--station", "S", "--points", str(ws / "fused.ply")])
+    seen = []
+
+    def fake_mesh(cmd, **kw):
+        out = Path(cmd[cmd.index("--out") + 1])
+        seen.append(cmd[cmd.index("--points") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        from rpp.ibr.mesh import write_mesh
+        V = np.array([[-50, -50, 0], [50, -50, 0], [50, 50, 0], [-50, 50, 0]], float)
+        write_mesh(out / "mesh.ply", V, np.array([[0, 1, 2], [0, 2, 3]]))
+        spikes = 3 if "NZ34" in seen[-1] else 40
+        (out / "mesh_report.json").write_text(json.dumps({"pivot_block_m": [0, 0, 2.0], "terrain_triangles": [0, 2],
+                                                          "fill": {"checks": {"spike_triangles": spikes, "warnings": []}}}))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(FC.subprocess, "run", fake_mesh)
+    monkeypatch.setattr(FC, "tie_points", lambda sparse: np.c_[np.random.default_rng(0).uniform(-20, 20, (500, 2)), np.zeros(500)])
+    rep = FC.compare_station("S", tmp_path, cfg={"stations": {}}, variants=("current",), clouds={"z34": z / "fused.ply"})
+    assert set(rep["variants"]) == {"current", "z34"}
+    assert rep["variants"]["z34"]["spike_triangles"] == 3 and rep["variants"]["current"]["spike_triangles"] == 40
+    assert rep["variants"]["z34"]["verdict"] == "not worse"
+    assert any(p.endswith(str(Path("dense_S003D0010_NZ34") / "fused.ply")) for p in seen)
+    assert "| z34 | not worse | 2 | 3 |" in (ws / "compare" / "S_comparison.md").read_text()
+
+
+def test_zcam_zoom_and_the_zoom_filter():
+    from rpp.sfm.dense import zcam_zoom
+    assert zcam_zoom("ZL0_0502_0711508776_988RAD_N0261222ZCAM07101_0340LMA01.png") == 34
+    assert zcam_zoom("ZR0_0502_0711508776_988RAD_N0261222ZCAM07101_1100LMA01.png") == 110
+    assert zcam_zoom("ZL0_0003_0667217146_000RAD_N0010052AUT_04096_034085A01.IMG") == 34
+    assert zcam_zoom("NLF_0502_0711506944_402RAD_N0261222NCAM00708_0A0095J01.png") is None
