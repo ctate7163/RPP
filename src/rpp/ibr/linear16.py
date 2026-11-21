@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import logging
 import re
 from pathlib import Path
@@ -185,6 +186,40 @@ def find_product(stem: str, roots: Sequence[PathLike]) -> Optional[Path]:
     return None
 
 
+def radiometry_key(cfg: Dict[str, Any]) -> str:
+    """1.1: the identity of the settings that turn a product's radiance into its 16-bit values - the radiometry
+    section (the tau correction, its table and reference, the Sun's distance) and the color section's balances,
+    brightness factors and scale.  A cached 16-bit frame made under another key is made again
+    (:func:`ensure_linear16`), and a station's stored tone levels are dropped (:func:`reset_stale_levels`) - so a
+    change such as 1.1's Sun-distance term reaches every station product, never a mix of old and new frames."""
+    import hashlib
+    c = cfg.get("color") or {}
+    part = {"radiometry": cfg.get("radiometry") or {},
+            "color": {k: c.get(k) for k in ("enhance", "white_balance_ecam", "white_balance_hazcam", "white_balance_zcam",
+                                            "white_balance_vce", "brightness_by_family", "scale_rad_to_int16")}}
+    return hashlib.sha1(json.dumps(part, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+def reset_stale_levels(path: Optional[PathLike], key: Optional[str]) -> bool:
+    """1.1: a station's shared levels file (``tone_levels.json``: exposure, black point, ground level, color-product
+    parameters) holds values measured on panoramas of one radiometry; when its ``radiometry_key`` is not ``key`` the
+    values are dropped (found again by the next panorama) and the key is written.  True when values were dropped."""
+    if not path or not key:
+        return False
+    f = Path(path)
+    d: Dict[str, Any] = {}
+    if f.is_file():
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except ValueError:
+            d = {}
+    if d.get("radiometry_key") == key:
+        return False
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"radiometry_key": key}, indent=1), encoding="utf-8")
+    return bool([k for k in d if k != "radiometry_key"])
+
+
 def files(project, name: str) -> Tuple[Path, Path]:
     d = Path(project.root) / DIR
     return d / name, d / (Path(name).stem + ".sat.png")
@@ -200,17 +235,24 @@ def ensure_linear16(project, names: Iterable[str], pds: Optional[PathLike] = Non
     recf = out / RECORD
     record = json.loads(recf.read_text(encoding="utf-8")) if recf.is_file() else {}
     names = list(names)
-    todo = [n for n in names if force or not all(f.is_file() for f in files(project, n))]
+    cfg, key, cfg_error = None, None, None
+    try:
+        cfg = block_config(project)
+        key = radiometry_key(cfg)
+    except FileNotFoundError as e:
+        cfg_error = str(e)
+    # 1.1: a frame cached under other radiometric settings (before 1.1: no key - without the Sun's distance) is stale
+    stale = {n for n in names if key and (record.get(n) or {}).get("radiometry_key") != key}
+    todo = [n for n in names if force or n in stale or not all(f.is_file() for f in files(project, n))]
     have = [n for n in names if n not in todo]
+    n_stale = len([n for n in todo if n in stale and all(f.is_file() for f in files(project, n))])
+    if n_stale:
+        log.info("linear16: %d cached frame(s) were made with other radiometric settings - made again (key %s)", n_stale, key)
     missing: Dict[str, str] = {}
     roots = archive_roots(project, pds) if todo else []
-    cfg = None
-    if todo:
-        try:
-            cfg = block_config(project)
-        except FileNotFoundError as e:
-            missing = {n: str(e) for n in todo}
-            todo = []
+    if todo and cfg is None:
+        missing = {n: cfg_error or "no block configuration" for n in todo}
+        todo = []
     made = 0
     for n in todo:
         stem = Path(n).stem
@@ -237,17 +279,28 @@ def ensure_linear16(project, names: Iterable[str], pds: Optional[PathLike] = Non
                 sat = cv2.resize(sat.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
                 facts["resized"] = True
         f, s = files(project, n)
-        cv2.imwrite(str(f), np.ascontiguousarray(i16[..., ::-1]))
-        cv2.imwrite(str(s), sat.astype(np.uint8) * 255)
+        for dst, arr in ((f, np.ascontiguousarray(i16[..., ::-1])), (s, sat.astype(np.uint8) * 255)):
+            tmp = dst.with_name(f"{dst.stem}.tmp{os.getpid()}{dst.suffix}")     # 1.1: whole files only - another
+            cv2.imwrite(str(tmp), arr)                                           # station run may read this frame
+            os.replace(tmp, dst)
         facts["source"] = str(prod)
+        facts["radiometry_key"] = key
         record[n] = facts
         have.append(n)
         made += 1
         log.info("linear16: %s  saturated %.2f %%, clipped in 8-bit %.2f %%, in 16-bit %.2f %%", n,
                  100 * facts["saturated_share"], 100 * facts["clipped_in_8bit_share"], 100 * facts["clipped_in_16bit_share"])
     if made:
-        recf.write_text(json.dumps(record, indent=1, default=float), encoding="utf-8")
+        try:                                                       # 1.1: another run's entries since this one read it
+            now = json.loads(recf.read_text(encoding="utf-8")) if recf.is_file() else {}
+        except ValueError:
+            now = {}
+        record = {**now, **{n: record[n] for n in todo if n in record}}
+        tmp = recf.with_name(f"{recf.name}.tmp{os.getpid()}")
+        tmp.write_text(json.dumps(record, indent=1, default=float), encoding="utf-8")
+        os.replace(tmp, recf)
     return {"dir": str(out), "have": have, "missing": missing, "made": made, "roots": [str(r) for r in roots],
+            "radiometry_key": key, "remade_stale": n_stale,
             "frames": {n: record.get(n) for n in have}}
 
 

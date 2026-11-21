@@ -10,6 +10,12 @@ The development history before 1.0 is in
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
 ## 1.1.0.dev0 — in development (branch v1p1)
+- Station products follow the radiometric settings: a cached 16-bit frame (`images16/`) made under other settings - or
+  before 1.1, without the Sun's distance - is made again from its PDS product (`rpp.ibr.linear16.radiometry_key`), and
+  a station's stored levels (`tone_levels.json`) are found again.  So an `rpv_process` run of 1.1 remakes every
+  station's source frames with the new brightness; before this a station would have kept its old frames, or mixed old
+  and new ones.  The frames and the record are written as whole files (two station runs may share a block's frames).
+  The blocks' 8-bit images, features and alignments are not touched.
 - Radiometry: the zenith scale carries the Sun's distance, s = (d_ref/d)² μ exp[−(τ − τ_ref)/(6μ)] with d from the
   orbit at the image's L_s and d_ref = 1.5237 au (`radiometry.apply_sun_distance`, on by default;
   `rpp.radiometry.sun_distance_scale`).  Sunlight varies by a factor 1.45 between perihelion and aphelion; ten station
