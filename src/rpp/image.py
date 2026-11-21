@@ -27,6 +27,7 @@ from .labels import (ZCAM_OPTICS_KEYS, ZCAM_TEMPERATURE_KEY, camera_temperature,
                      label_float, label_get, read_pds, zcam_optics_temperature)
 from .paths import data_dir, resolve_resource
 from .waypoints import lonlat_of, offset_lonlat, waypoint_for_site_drive
+from .waypoints.table import has_station, station_alias
 
 log = logging.getLogger("rpp.process")
 
@@ -273,6 +274,9 @@ class RPPImage:
                                      f"{self.path.name} in the landing frame.{hint}")
                 extra = offset_ned
                 src = f"waypoint site {self.site} drive 0 + label ORIGIN_OFFSET_VECTOR"
+            elif station_alias(self.site, self.drive) and not has_station(waypoints, self.site, self.drive):
+                a = station_alias(self.site, self.drive)    # 1.1: the same rover position under another station
+                src = f"waypoint site {a[0]} drive {a[1]} (station alias of site {self.site} drive {self.drive})"
             else:
                 src = f"waypoint site {self.site} drive {self.drive} (exact)"
             p = wp.get("properties", wp)

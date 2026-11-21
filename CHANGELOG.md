@@ -10,6 +10,10 @@ The development history before 1.0 is in
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
 ## 1.1.0.dev0 — in development (branch v1p1)
+- The landing frames of sols 1-4 come into Butler Landing: the site keeps the `AUT_` sequences (`SEQUENCE_PREFIXES`), and
+  station S001D0052, which the waypoint table does not have, is placed at the S003D0000 waypoint
+  (`rpp.waypoints.table.STATION_ALIASES`; the rover did not move until sol 14), with the looser prior of a station
+  without its own waypoint.
 
 Station meshes without the misshapen fill and the failed depth maps behind them (Christian, 21 Nov 2026: "a wrong
 large rounded hill behind the rover", "mesh floaters and spikes in rockytop" - "How can we prevent these sorts of

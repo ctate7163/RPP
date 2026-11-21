@@ -66,9 +66,10 @@ UNSURVEYED_ATTITUDE_PRIOR_DEG = 3.0
 
 def is_unsurveyed(row: Optional[Dict[str, Any]]) -> bool:
     """A project image row whose position prior is not a waypoint of its own station (``position_source`` "waypoint
-    site N drive 0 + label ORIGIN_OFFSET_VECTOR", :meth:`rpp.image.RPPImage._position`)."""
+    site N drive 0 + label ORIGIN_OFFSET_VECTOR", or 1.1 "... (station alias of site S drive D)",
+    :meth:`rpp.image.RPPImage._position`)."""
     src = str((row or {}).get("position_source") or "")
-    return src.startswith("waypoint") and "ORIGIN_OFFSET_VECTOR" in src
+    return src.startswith("waypoint") and ("ORIGIN_OFFSET_VECTOR" in src or "station alias" in src)   # 1.1: aliases
 K2_LIMIT = 10.0                  # v0p85 (Christian): a camera's k2 is kept within +-10 (set to +-10 when beyond)
 BOGUS_MAX_EXTRA_PARAM = 1.0e6    # COLMAP's "bogus camera" limits off (default 1.0, 10, 0.1) - see triangulate()
 BOGUS_MAX_FOCAL_RATIO = 1.0e3
