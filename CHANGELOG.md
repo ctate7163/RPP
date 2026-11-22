@@ -9,7 +9,7 @@ The development history before 1.0 is in
 [`docs/history/`](https://github.com/ctate7163/rpp/tree/main/docs/history): `CHANGELOG_v0p95-v0p99.md`,
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
-## 1.0.2.dev0 — in development (branch v1p01; numbered 1.0.1.dev0 until the evening of 21 Nov 2026)
+## 1.0.2 — 21 Nov 2026 (branch v1p01; numbered 1.0.1.dev0 and 1.0.2.dev0 during the day)
 - Brightness: the scale of every camera x 1.1 (`color.scale_rad_to_int16` 2e5 -> 2.2e5; for some hours of 21 Nov a
   key of its own, `color.brightness_gain`).  The level had been set on blocks imaged near perihelion; the
   Sun-distance term darkens those by 0.82, so the new scale puts them at 0.90 of their old level and the aphelion
@@ -35,7 +35,7 @@ The development history before 1.0 is in
   nothing was uploaded (21 Nov 17:14, from a 1.0.0rc1 run).
 - Navcam left and right: `color.brightness_by_eye` {"NL": 0.977, "NR": 1.023}.  On 11 stereo pairs of sols 72-1601
   (RAD products, matched points) the right eye's radiance is 0.955 of the left's (median; pairs 0.90-0.98).
-- The version is 1.0.2.dev0.
+- The version is 1.0.2.
 - Welcome view: Van Zyl's own entry with every variant (stereo, rover, full 3D), opened in the original color, made
   again after an upload so its files have their dataset addresses; WEST in the sky only with the info page; the
   "Mars 2020 Perseverance rover" line lower, blue in orange; the home button 40 px, white at home, orange elsewhere.
