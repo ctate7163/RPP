@@ -2646,9 +2646,13 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
             scape_done = False
             if use_masks and _sm.SCAPE:                  # 0.99.51 (Christian, 20 Nov 2026: "The ..._station_mesh_terrain
                 try:                                     # should use the same texture as the ..._station_scape_terrain just
+                    try:                                 # 1.0.2: the sky of the full 3D texture is the panorama's (the
+                        sky_pano = (res["rgb"], float(azimuth0_deg))     # eye rendered last: the sky is far, either serves)
+                    except Exception:                    # noqa: BLE001 - no eye in reach: the texture's own, smoothed
+                        sky_pano = None
                     part = _sm.terrain_part(scene, sources, station, pool, size=_sm.TEXTURE_PX,    # with a smaller mesh"):
                                             target=_sm.TARGET_TRIANGLES, linear=linear,            # the full 3D part
-                                            rows_per_chunk=rows_per_chunk, full=True)              # first; the local 3D
+                                            rows_per_chunk=rows_per_chunk, full=True, sky_pano=sky_pano)   # first; the local 3D
                     rec_out["station_scape"] = _sm.write_part(out, pf, "scape", part, station, to8, to16)   # terrain is its
                     local = dict(part, shell=None, record=dict(part["record"], texture_of="station_scape_terrain",  # mesh
                                                                shell=None))                                       # without

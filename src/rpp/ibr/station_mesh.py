@@ -561,14 +561,37 @@ def one_skyline(rgb: np.ndarray, sky: np.ndarray, far: np.ndarray, have: np.ndar
     return new
 
 
+def pano_sky(pano: np.ndarray, azimuth0_deg: float, d: np.ndarray, up, north, east) -> np.ndarray:
+    """1.0.2: the colors (n, 3) an equirectangular eye ``pano`` (row 0 the zenith, the left edge of column 0 at
+    ``azimuth0_deg`` east of north) shows along the unit directions ``d`` (n, 3) - bilinear, wrapped in azimuth."""
+    u, n_, e = _unit(up), _unit(north), _unit(east)
+    H, W = pano.shape[:2]
+    el = np.degrees(np.arcsin(np.clip(d @ u, -1.0, 1.0)))
+    az = np.degrees(np.arctan2(d @ e, d @ n_))
+    x = ((az - float(azimuth0_deg)) / 360.0 % 1.0) * W - 0.5
+    y = np.clip((90.0 - el) / 180.0 * H - 0.5, 0.0, H - 1.0)
+    x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+    xa, xb = x0 % W, (x0 + 1) % W
+    ya, yb = y0, np.minimum(y0 + 1, H - 1)
+    P = np.asarray(pano, np.float32)
+    return (P[ya, xa, :3] * (1 - fx) + P[ya, xb, :3] * fx) * (1 - fy) + (P[yb, xa, :3] * (1 - fx) + P[yb, xb, :3] * fx) * fy
+
+
 def smooth_sky(rgb: np.ndarray, far: np.ndarray, size: int, rpx: float, knee, feather_deg: float = SKY_FEATHER_DEG,
-               sigma_deg: float = SKY_SMOOTH_DEG) -> int:
+               sigma_deg: float = SKY_SMOOTH_DEG, pano=None, frame=None) -> int:
     """1.0.1 (Christian, 21 Nov 2026: "use the panoramas own sky instead of white. Make sure that artifacts above the sky
     line are smoothed out"): the far texels (``far``: the sky and the hills beyond the mesh, colored by the frames or
     filled from them) keep their colors below the skyline's circle - the hills, as in the panorama - and above it are
     the far texels' own Gaussian mean (``sigma_deg`` at the circle's texel scale), which takes out the frames' edges
     and blemishes; the two are mixed over ``feather_deg`` below the circle.  ``rgb`` float in place.  Returns the
-    texels changed."""
+    texels changed.
+
+    ``pano`` = (an eye of the station's panorama, linear, in the texture's units; its azimuth0_deg) with ``frame`` =
+    (up, north, east): above the circle the texels take the PANORAMA'S sky in their direction, not the mean
+    (Christian, 21 Nov 2026: "fix the streaks in the full-3d. it isn't an issue in the ods" - the panorama's sky is one
+    smooth fit; the texture's own far texels, filled column by column where no frame saw the sky, ran as streaks to
+    the zenith, tens of degrees wide - wider than any mean of a few degrees)."""
     import cv2
     if not knee or not far.any():
         return 0
@@ -592,6 +615,16 @@ def smooth_sky(rgb: np.ndarray, far: np.ndarray, size: int, rpx: float, knee, fe
         return 0
     ys, xs, t = ys[m], xs[m], t[m]
     t = t * t * (3.0 - 2.0 * t)                                 # smoothstep
+    if pano is not None and frame is not None:
+        try:
+            d, _ = disc_dirs(ys, xs, size, rpx, np.pi, frame[0], frame[1], frame[2], knee=knee)
+            col = pano_sky(pano[0], float(pano[1]), np.asarray(d, float), *frame)
+            ok = np.isfinite(col).all(axis=1) & (col.max(axis=1) > 0)
+            t = np.where(ok, t, 0.0).astype(np.float32)          # where the panorama has nothing, the texel stays
+            rgb[ys, xs] = rgb[ys, xs] * (1.0 - t[:, None]) + np.nan_to_num(col).astype(np.float32) * t[:, None]
+            return int((t > 0).sum())
+        except Exception as e:                                   # noqa: BLE001 - then the mean, as before
+            log.warning("station mesh: the panorama's sky was not used (%s: %s) - the far texels' mean instead", type(e).__name__, e)
     gx, gy = np.clip(xs // k, 0, n - 1), np.clip(ys // k, 0, n - 1)
     den = np.maximum(wb[gy, gx], 1e-6)
     for ch in range(3):
@@ -1013,7 +1046,7 @@ def border_fill(rgb: np.ndarray, used: np.ndarray, border_px: int = BORDER_PX) -
 # ------------------------------------------------------------------------------------------- the two parts
 def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, radius_m: float = RADIUS_M,
                  center_above_m: float = CENTER_ABOVE_M, target: int = TARGET_TRIANGLES, linear: bool = False,
-                 rows_per_chunk: int = 128, full: bool = False) -> Dict[str, Any]:
+                 rows_per_chunk: int = 128, full: bool = False, sky_pano=None) -> Dict[str, Any]:
     """The terrain mesh and its texture (see the module): {"V" block (n, 3), "F", "uv" (n, 2), "texture" (S, S, 3)
     float or uint8 as the sources, "record"}.
 
@@ -1086,7 +1119,7 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     sky_white = None
     sky_smoothed = 0
     if full and SKY_IMAGED and sky is not None:                  # 1.0.1: the panorama's own sky, smoothed above the skyline
-        sky_smoothed = smooth_sky(rgb, sky & in_disc, size, rpx, knee)
+        sky_smoothed = smooth_sky(rgb, sky & in_disc, size, rpx, knee, pano=sky_pano, frame=(up, north, east))
     elif full and SKY_WHITE and sky is not None:                 # 0.99.41: the sky white
         sky_white = sky_texels(rgb, sky & in_disc, have, in_disc, size, rpx, knee)
     sky = None
@@ -1138,7 +1171,8 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     if white is not None:
         rec.update(white_texels=int(white.sum()))
     if sky_smoothed:
-        rec.update(sky="as imaged; the far texels above the skyline's circle smoothed", sky_texels_smoothed=int(sky_smoothed))
+        rec.update(sky=("as imaged below the skyline's circle; above it the panorama's sky" if sky_pano is not None else
+                        "as imaged; the far texels above the skyline's circle smoothed"), sky_texels_smoothed=int(sky_smoothed))
     return {"V": Vo[keep], "F": remap[Fo], "uv": UVo[keep], "texture": rgb, "record": rec, "shell": out_shell, "white": white}
 
 

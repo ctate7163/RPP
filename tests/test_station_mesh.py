@@ -937,3 +937,36 @@ def test_a_sheet_under_the_surface_takes_the_disc_and_bright_sky_keeps_its_hue()
     ramp = np.stack([np.linspace(200, 400, 201)] * 3, axis=-1).astype(np.float32) * np.array([0.95, 0.9, 1.0], np.float32)
     o = tone_pipeline(ramp)
     assert (np.diff(o.max(axis=-1)) >= -1e-3).all() and float(np.abs(np.diff(o, axis=0)).max()) < 2.0    # no step
+
+
+def test_the_full_3d_sky_is_the_panoramas_above_the_skyline():
+    """1.0.2 (Christian, 21 Nov 2026: "fix the streaks in the full-3d. it isn't an issue in the ods"): pano_sky reads an
+    eye along a direction (row 0 the zenith, column 0 at azimuth0 east of north), and smooth_sky puts the panorama's
+    sky on the far texels above the skyline's circle - streaks in the texture's own sky are gone, the hills below stay."""
+    from rpp.ibr import station_mesh as M
+    up, north, east = (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)
+    H, W = 180, 360
+    pano = np.zeros((H, W, 3), np.float32)
+    pano[..., 0] = (np.arange(W) + 0.5)[None, :]                     # red: the azimuth in degrees (azimuth0 = 0)
+    pano[..., 1] = (90.0 - (np.arange(H) + 0.5))[:, None] + 100.0    # green: the elevation + 100
+    pano[..., 2] = 50.0
+    d = np.array([[np.sin(np.radians(90.0)) * np.cos(np.radians(30.0)), np.cos(np.radians(90.0)) * np.cos(np.radians(30.0)), np.sin(np.radians(30.0))],
+                  [np.sin(np.radians(200.0)) * np.cos(np.radians(60.0)), np.cos(np.radians(200.0)) * np.cos(np.radians(60.0)), np.sin(np.radians(60.0))]])
+    c = M.pano_sky(pano, 0.0, d, up, north, east)
+    assert np.allclose(c[:, 0], [90.0, 200.0], atol=0.6) and np.allclose(c[:, 1], [130.0, 160.0], atol=0.6)
+    assert np.allclose(M.pano_sky(pano, 40.0, d[:1], up, north, east)[0, 0], 50.0, atol=0.6)       # azimuth0 = 40
+    S, rpx = 512, 250.0
+    knee = (np.pi / 2 + np.radians(5.0), 0.9)
+    yy, xx = np.mgrid[:S, :S]
+    rho = np.hypot(xx + 0.5 - S / 2, S / 2 - (yy + 0.5))
+    r_h = float(M._rho_of_theta(np.array([np.pi / 2]), rpx, np.pi, knee)[0])
+    far = (rho > r_h) & (rho <= rpx)
+    rgb = np.full((S, S, 3), 80.0, np.float32)
+    rgb[far] = 200.0
+    rgb[far & (((np.degrees(np.arctan2(xx - S / 2, S / 2 - yy)) // 20) % 2) == 0)] = 150.0       # streaks to the zenith
+    hill = far & (rho < r_h + 0.3 * (knee[1] * rpx - r_h))
+    before = rgb[hill].copy()
+    flat = np.full((H, W, 3), 210.0, np.float32)
+    n = M.smooth_sky(rgb, far, S, rpx, knee, pano=(flat, 0.0), frame=(up, north, east))
+    high = far & (rho > knee[1] * rpx + 2)
+    assert n > 0 and np.allclose(rgb[high], 210.0, atol=0.5) and np.allclose(rgb[hill], before)

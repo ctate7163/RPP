@@ -37,6 +37,9 @@ The development history before 1.0 is in
   others with it, and the color fades to white (`PIPELINE_FADE`).  Rolled off channel by channel, a sky at the knee
   changed hue - a white band over the horizon and purple columns above it in the brighter images of 1.0.1.  Nothing
   changes where no channel is above the knee.  The 16 bits had headroom throughout (Van Zyl: 448 of 1024 at most).
+- Full 3D sky: above the skyline's circle the texture takes the panorama's sky in each texel's direction
+  (`station_mesh.pano_sky`), not its own far texels - those, filled column by column where no frame saw the sky, ran
+  as streaks to the zenith.  The panorama's sky is one smooth fit.
 - Full 3D texture: a hidden triangle that lies within 0.35 m under another sheet of the mesh takes the disc like
   the sheet above it (`station_mesh.under_a_sheet`).  The fill's sheets are not sewn to the measured ground, and
   through the cracks one saw the sheet beneath in a cell's fill tone - gray slivers along the patch under the rover.
