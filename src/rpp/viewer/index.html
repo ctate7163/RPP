@@ -1556,7 +1556,6 @@ function buttons(dt) {                           // xr-standard: button 4 is A (
       if (down && !bDone && now - bDown > HOLD_B_MS) { bDone = true; driveByHold(); }
       if (!down && bDown) { if (!bDone) stereoOrFull(); bDown = 0; }
     }
-    if (false) { if (left) goHome(); else stereoOrFull(); }         // 0.98.28: Y (left): home, facing west; B (right): 0.99.41 stereo / full 3D
     // 0.99.40 (Christian, 19 Nov 2026: "In VR mode, enter driving/ steering mode with a click on the joystick. Left and
     // right still rotate the view and forward and back on the left and right controler works in like skid steering"):
     // a thumbstick click (xr-standard button 3) starts the drive where the station has it, and ends it

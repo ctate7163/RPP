@@ -52,8 +52,38 @@ The full 3D model only; meshes, depth maps and panoramas are those of 1.0.4.
   when the button comes up); the stick's click no longer starts the drive.
 - Viewer: a station without the full 3D model is left out of the page (the list keeps it; `?all=1` shows every
   station); it shows again when a run uploads its model.
+- **The horizon shell has no gap** (`horizon_shell`; in the headset "a black semi circle behind Skinner Ridge and the
+  others").  Its first ring was at the angle of 17 m on level ground, the same at every azimuth; where the ground
+  falls away the surface at that angle is far beyond the near terrain's end (Skinner Ridge, to the south: 32 m at
+  -10 deg, the terrain ends at 20 m), and a ray below the horizontal that met nothing was put on level ground under
+  the mast - nearer than 17 m, so its triangles were left out.  The first ring is now the lowest angle at which any
+  azimuth is 17 m away, such a ray is no nearer than the ring beneath it, and a triangle with a corner on the far
+  surface or the sky is always kept (the far surface 105 m overhead left a wedge of the zenith without sky).
+  Directions with nothing drawn, seen from the mast (2.88 million): Skinner Ridge 32,637 to 30, Wildcat Ridge 4,699
+  to 18 (the rest are cracks of the 1.0.4 terrain, which the one sheet does not have).
+- **A floater is not taken into the terrain** (`under_floaters`; Wildcat Ridge: "a bad floater attached to the ground
+  in front of the rover" - a sheet 5.4 m long, 2 m over the slope, on a thin post; Rockytop has one 17 m out).  The
+  top surface is lowered to the surface beneath where it floats (0.4 m of air or more under 0.6 m of mesh or less),
+  piece by piece: a piece goes when the ground does not hold it (less than a tenth of its rim is joined to ground
+  1.5 m broad or more), it is more than twice as large as the narrow thing it stands on, and the mast sees the
+  ground under half of it or more; its post goes with it.  Wildcat Ridge: 3.3 m2 lowered by up to 2.25 m; Rockytop
+  Sol0461: 4.6 m2 by up to 2.9 m; Skinner Ridge: nothing (its ledges and the boulder by the rover stay whole).
+- **The sky above the skyline is a model of the panorama's sky** (`sky_model`; Rockytop: "the top pole has artifacts
+  in the sky").  The panorama of Sol0461 has a dark red patch at 60 - 75 deg and Wildcat Ridge's a violet oval over
+  the ridge; the texture took the panorama's pixels.  Now: one color per degree of elevation (the median over the
+  azimuths without empty and outlying pixels), and along the skyline's circle the panorama's own color in each
+  direction, fading into it over 12 deg.  The panoramas themselves are not changed (see "Not in this version").
+- **`single-sites --terrain regular`**: the block's terrain as with `block`, but of a LARGE or HUGE block only a part,
+  so that fewer depth maps are made - the alignment is the large block's.  The part: the frames of the sols of the
+  regular block of the same place (`van_zyl_overlook`, sols 49-71, for a station of `van_zyl_overlook_huge`: 4 of its
+  26 waypoints), when the station's sol is one of them; else (no regular block in the site definitions, or the
+  station is not of its sols) the frames of the stations within 30 m of it; and always its own.  The cloud is
+  `colmap/dense_block_<name>_<families>`.  `rpp dense --block-images` takes patterns (`???_0052_*`).  A station
+  made before with the whole block's cloud is made again (its commands differ).
 - Not in this version: the mesh's own cracks (`mesh.ply` is as 1.0.4 makes it; the panoramas, rendered from the mast,
-  do not show them), and the white disc at the base of the rock at Van Zyl (in the panorama itself; origin not found).
+  do not show them), the white disc at the base of the rock at Van Zyl (in the panorama itself; origin not found),
+  the patches in the panoramas' own sky (the red one of Sol0461; they are in the ODS images, not only the model), and
+  ground the fill puts above the real skyline behind a crest (Skinner Ridge: it takes the sky's white).
 
 ## 1.0.4 — 21 Nov 2026 (branch v1p01)
 - Station mesh, one sheet (`rpp.ibr.mesh.tidy_sheets`, after the fill; `mesh_report.json` `fill.tidy`): within 10 m

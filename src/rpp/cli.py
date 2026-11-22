@@ -216,7 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "the workspace is dense_block_<families>; --cameras still chooses the station's own frames")
     p.add_argument("--block-images", nargs="+", default=None, metavar="NAME",
                    help="with --whole-block, the block's cloud from these frames only (a terrain set of the "
-                        "single-sites config), in the workspace dense_block_<--block-name>")
+                        "single-sites config), in the workspace dense_block_<--block-name>; a name with * ? [ is a "
+                        "pattern over the block's frames of the --block-cameras families (???_0052_*: sol 52)")
     p.add_argument("--block-name", default=None, help="the name of the --block-images set (its workspace)")
     p.add_argument("--scale", type=float, default=None, help="--station: only frames at this downsample (0.5: half-res)")
     p.add_argument("--images", nargs="+", default=None, help="only these image names (instead of --station)")
@@ -927,7 +928,15 @@ def cmd_dense(a: argparse.Namespace) -> int:
             print(f"dense --whole-block: no frames of the families {''.join(sorted(fam))!r} in {proj_dir}", file=sys.stderr)
             return 2
         ws = proj_dir / f"{DENSE_DIR}_block_{''.join(sorted(fam))}"
-        pick = [n if str(n).lower().endswith(".png") else f"{n}.png" for n in (getattr(a, "block_images", None) or [])]
+        raw = [str(n) for n in (getattr(a, "block_images", None) or [])]
+        wild = [n for n in raw if any(c in n for c in "*?[")]    # 1.0.5: a name with * ? [ is a pattern over the block's
+        pick = [n if n.lower().endswith(".png") else f"{n}.png" for n in raw if n not in wild]   # frames (single-sites --terrain regular)
+        if wild:
+            import fnmatch
+            hits = {m for n in wild for m in fnmatch.filter(subset, n)}
+            print(f"dense --block-images: {len(wild)} pattern(s) match {len(hits)} of the block's {len(subset)} "
+                  f"{''.join(sorted(fam))} frames")
+            pick = sorted(set(pick) | hits) or ["(no frame matches the patterns)"]
         if pick:                                                 # 0.98.19: a named set of the block's frames
             known = set(subset)
             gone = [n for n in pick if n not in known]

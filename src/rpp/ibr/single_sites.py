@@ -58,6 +58,85 @@ def block_terrain(st: Dict[str, Any], cfg: Dict[str, Any]):
     return name, [n if str(n).lower().endswith(".png") else f"{n}.png" for n in sets[name]["images"]]
 
 
+REGULAR_SUFFIXES = ("_large", "_huge")  # 1.0.5: the sizes of a block that --terrain regular limits
+REGULAR_NEAR_M = 30.0                   # ... to the stations within this of the station, where no regular block serves
+_PROJECT_CACHE: Dict[str, Any] = {}
+
+
+def _block_project(work: PathLike):
+    """The block's project (cached on its file's time), or None."""
+    f = Path(work) / "colmap" / "project.json"
+    try:
+        m = f.stat().st_mtime
+    except OSError:
+        return None
+    c = _PROJECT_CACHE.get(str(f))
+    if c and c[0] == m:
+        return c[1]
+    try:
+        from ..sfm.project import SfmProject
+        proj = SfmProject.load(f.parent)
+    except Exception:                                           # noqa: BLE001 - then the whole block
+        proj = None
+    _PROJECT_CACHE[str(f)] = (m, proj)
+    return proj
+
+
+def regular_terrain(st: Dict[str, Any], label: str, work: PathLike, families: Optional[str] = None,
+                    near_m: float = REGULAR_NEAR_M):
+    """1.0.5 (Christian, 22 Nov 2026: "Run van zyl from the large or huge block, but limit the depth maps just to
+    the sites in the van zyl regular block. Do this for the others too to avoid excessivly large number of images
+    needed to processes ad depth maps"): the part of a LARGE or HUGE block whose frames make a station's terrain -
+    (name, patterns over the block's frame names, a line for the log) - or None: the whole block (a block that is
+    not large or huge, or nothing narrower could be told).
+
+    * the regular block of the same place (``van_zyl_overlook`` for ``van_zyl_overlook_huge``; the block's folder,
+      then the station's ``site``): when the station's sol is one of its sols, the frames of its sols - the site
+      definitions say which (a block is its sol ranges) - and the station's own;
+    * else (no regular block in the site definitions, or the station is not of its sols - Sol0816 of Belva Crater
+      Large, the Three Forks, Seitah, Bright Angel and Witch Hazel stations): the frames of the stations within
+      ``near_m`` of this one in the block's alignment priors, and its own.
+
+    The alignment is the large block's either way; only the depth maps and the cloud are fewer."""
+    import re
+    from ..waypoints.sites import in_sol_ranges, load_site_table, parse_work_folder, sol_ranges
+    names = []
+    try:
+        names.append(parse_work_folder(work)[0])
+    except Exception:                                           # noqa: BLE001
+        pass
+    names.append(st.get("site"))
+    names = [n for n in dict.fromkeys(names) if n and str(n).endswith(REGULAR_SUFFIXES)]
+    if not names:
+        return None
+    m = re.match(r"^\s*(\d+)_(\d+)\s*$", str(st.get("station") or ""))
+    own = [f"*_N{int(m.group(1)):03d}{int(m.group(2)):04d}*"] if m else []
+    sols = viewer_sols(st, label) or []
+    table = load_site_table()["sites"]
+    for n in names:
+        base = re.sub(r"_(large|huge)$", "", str(n))
+        site = table.get(base)
+        if not site or not sols or not all(in_sol_ranges(int(x), site["sols"]) for x in sols):
+            continue
+        pats = [f"???_{sol:04d}_*" for a, b in sol_ranges(site["sols"]) for sol in range(int(a), int(b) + 1)]
+        return base + (f"_{''.join(sorted(set(families.upper())))}" if families else ""), pats + own, \
+            f"the regular block {base} (sols {', '.join(f'{a}-{b}' for a, b in sol_ranges(site['sols']))}) of {n}"
+    if not m:
+        return None
+    proj = _block_project(work)
+    if proj is None:
+        return None
+    try:
+        from ..sfm.dense import nearby_station_images
+        nb = nearby_station_images(proj, str(st["station"]), float(near_m), families=(families or "N").upper())
+    except Exception:                                           # noqa: BLE001 - then the whole block
+        return None
+    toks = sorted(nb.get("stations") or {})
+    pats = own + [f"*_N{k[1:4]}{k[5:9]}*" for k in toks if re.match(r"^S\d{3}D\d{4}$", k)]
+    name = f"near{float(near_m):g}_S{int(m.group(1)):03d}D{int(m.group(2)):04d}" + (f"_{''.join(sorted(set(families.upper())))}" if families else "")
+    return name, pats, f"{len(toks)} station(s) within {float(near_m):g} m of it in {names[0]} (no regular block serves)"
+
+
 def mark_name(st: Dict[str, Any]) -> Optional[str]:
     """The block's name in a station's nadir mark: ``"mark_name"``, else its ``"name"`` without a trailing camera tag such
     as ``(Z34)`` (0.99.13, Christian, 17 Nov 2026: "The Zcam blue circles should have the same titles as the block name
@@ -480,13 +559,18 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
             #                                         chosen by --scale or --sequence can have context frames too)
         fa = fa + [str(x) for x in (cfg.get("dense_args") or []) + (st.get("dense_args") or [])]
         near = st.get("nearby_m", cfg.get("nearby_m"))          # 0.97.0: the neighbors' frames constrain the ground
-        bt = block_terrain(dict(st, terrain=terrain) if terrain else st, cfg)     # 0.99.43: --terrain for the run
+        reg = None
+        if terrain == "regular":                                # 1.0.5: the block's terrain, of a large block only a part
+            reg = regular_terrain(st, lab, work, bc)
+        bt = block_terrain(dict(st, terrain="block" if terrain == "regular" else terrain) if terrain else st, cfg)     # 0.99.43: --terrain for the run
         block = bt is not None                                       # 0.98.14 (Christian, 15 Nov 2026: "for rockytop use a
         #   model made from the full ncam block alignment"): the terrain from every Navcam frame of the block - one
         #   cloud (colmap/dense_block_N) shared by the block's stations; the panorama still from the station's frames
         if block:
             fa = frame_args(frames) + [str(x) for x in (cfg.get("dense_args") or []) + (st.get("dense_args") or [])] + ["--whole-block"]
-            if bt[0]:
+            if reg:                                             # 1.0.5: patterns over the block's frames
+                fa += (["--block-cameras", str(bc)] if bc else []) + ["--block-name", reg[0], "--block-images", *reg[1]]
+            elif bt[0]:
                 fa += ["--block-name", bt[0], "--block-images", *bt[1]]
             elif bc:
                 fa += ["--block-cameras", str(bc)]
@@ -531,7 +615,8 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
                     if nm:
                         argv += ["--site-name", str(nm)]
                 if step == "mesh" and block:                 # the block's cloud, not an older one of the station alone
-                    argv += ["--points", str(Path(work) / "colmap" / block_workspace(bt[0], None if bt[0] else bc) / "fused.ply")]
+                    ws_name = block_workspace(reg[0]) if reg else block_workspace(bt[0], None if bt[0] else bc)
+                    argv += ["--points", str(Path(work) / "colmap" / ws_name / "fused.ply")]
                 if step == "mesh" and (near or block):
                     argv += ["--keep-under-rover", f"{float(st.get('keep_under_rover_m', cfg.get('keep_under_rover_m', 0.25))):g}"]
                 argv += [str(x) for x in (cfg.get(f"{step}_args") or [])]      # 0.96.1: for every station
@@ -545,7 +630,7 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
                 cmds.append({"variant": v, "step": step, "argv": argv})
         runs.append({"label": lab, "code": station_code_of(st, lab), "old_label": st.get("old_label"),
                      "work": str(work), "out": str(base), "note": st.get("note", ""), "variants": vs,
-                     "commands": cmds})
+                     "terrain_part": reg[2] if reg else None, "commands": cmds})
     return runs
 
 
@@ -1112,6 +1197,9 @@ def add_parser(sub) -> None:
                    help="after the run, the stations' stereo JPEGs into DIR/panos and DIR/panos.json for the web "
                         "viewer (the page, rpp.viewer, is copied into DIR)")
     p.add_argument("--publish-only", action="store_true", help="with --publish or --upload: no steps, publish what --out holds")
+    p.add_argument("--page-only", action="store_true", help="1.0.5: only the viewer page (index.html, vendor/) of this "
+                   "installation into the viewer checkout (--publish DIR, default the RPV checkout), committed and "
+                   "pushed (--no-upload: not) - no station is touched")
     p.add_argument("--no-upload", action="store_true",
                    help="no upload, also when --upload is given (run_single_site_ibr.bat gives it)")
     p.add_argument("--upload", action="store_true",
@@ -1145,9 +1233,12 @@ def add_parser(sub) -> None:
                    help="the block terrain from the frames of these camera families (NFR: every engineering "
                         "camera of the block, every size, fused into one cloud - rpp dense --block-cameras; default: the "
                         "config's 'block_cameras', else Navcam alone)")
-    p.add_argument("--terrain", default=None, choices=("block", "own"),
+    p.add_argument("--terrain", default=None, choices=("block", "own", "regular"),
                    help="the terrain of every station of this run, whatever the config says - block: the whole "
-                        "block's cloud (also for the stations with a named terrain set); own: the station's own frames")
+                        "block's cloud (also for the stations with a named terrain set); own: the station's own frames; "
+                        "regular (1.0.5): as block, but of a LARGE or HUGE block only the frames of the regular block "
+                        "of the same place (its sols in the site definitions) or, where none serves, of the stations "
+                        f"within {REGULAR_NEAR_M:g} m - fewer depth maps, the same alignment")
     p.add_argument("--no-zcam", dest="zcam_companions", action="store_false", default=True,
                    help="without the Mastcam-Z 34 mm versions of the stations that have a Z34 360 (default, in a "
                         "run of the whole list - no station named, or --all: each is made right after its Navcam station)")
@@ -1245,10 +1336,35 @@ def freeze_alive(root: PathLike) -> bool:
     return st.get("state") == "running" and age < 1800
 
 
+def page_only(web_dir: Optional[PathLike] = None, upload: bool = True) -> int:
+    """1.0.5 (Christian, 22 Nov 2026: "In the meantime, remove the sites that don't have any full 3d model" - the
+    page that hides them had to wait for a station to be made): the viewer page of this installation into the viewer
+    checkout, committed and pushed - no station is touched."""
+    from . import web
+    web_dir = Path(web_dir) if web_dir else Path(web.viewer_dir())
+    git_dir = web_dir / ".git"
+    plock = FileLock((git_dir if git_dir.is_dir() else web_dir) / PUBLISH_LOCK)
+    plock.acquire(what="the viewer page")
+    try:
+        if not web.install_viewer(web_dir):
+            print("the viewer page (rpp/viewer/index.html, vendor/) is not in this installation")
+            return 1
+        if not upload:
+            print(f"the viewer page is in {web_dir} (not uploaded)")
+            return 0
+        up = web.upload(web_dir, [])
+        print(("uploaded: " if up["ok"] else "NOT uploaded: ") + up["message"], flush=True)
+        return 0 if up["ok"] else 1
+    finally:
+        plock.release()
+
+
 def _single_sites_pass(a: argparse.Namespace) -> int:
     if a.install:
         print(f"written: {install(a.install)}")
         return 0
+    if getattr(a, "page_only", False):
+        return page_only(a.publish, upload=not getattr(a, "no_upload", False))
     cfg = load_config(a.config)
     root = Path(a.root or rpp_env.get("RPP_SCAPES") or r"D:\rover_blocks")
     out_root = Path(a.out) if a.out else root / cfg.get("out", "single_sites")
@@ -1326,7 +1442,7 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
         return 0
     if a.dry_run:
         for r in runs:
-            print(f"{r['label']}: {r['work']} -> {r['out']}")
+            print(f"{r['label']}: {r['work']} -> {r['out']}" + (f"  [terrain: {r['terrain_part']}]" if r.get("terrain_part") else ""))
             for c in r["commands"]:
                 print(f"   [{c['variant']}] python -m rpp " + " ".join(c["argv"]))
         return 0

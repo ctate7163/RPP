@@ -1178,3 +1178,148 @@ def test_1p0p5_stands_on_the_panoramas_of_1p0p4():
     from rpp.ibr import single_sites as SS
     if rpp.__version__ == "1.0.5":
         assert SS.code_key() == "9360937dcbf555b7" and SS.code_hash() != SS.code_key()
+
+
+class _SlopeScene:
+    """A ground that falls away to the south (20 deg) out to 40 m from the mast axis, nothing beyond it: a ray that
+    misses it meets the far surface ``far_m`` away (label far) or, with ``far_m`` None, nothing."""
+    def __init__(self, C, far_m):
+        self.C, self.far_m = np.asarray(C, float), far_m
+        self.n = np.array([0.0, -np.tan(np.radians(20.0)), 1.0])
+        self.n /= np.linalg.norm(self.n)
+        self.p0 = self.C - [0.0, 0.0, 2.0]
+
+    def cast(self, O, D):
+        from rpp.ibr.raycast import LABEL_FAR, LABEL_MESH, LABEL_NONE, SKY_RANGE_M
+        den = D @ self.n
+        t = ((self.p0 - O) @ self.n) / np.where(np.abs(den) > 1e-12, den, 1e-12)
+        X = O + t[:, None] * D
+        hit = (t > 0) & (den < 0) & (np.hypot(X[:, 0] - self.C[0], X[:, 1] - self.C[1]) <= 40.0)
+        if self.far_m is None:
+            return {"t": np.where(hit, t, np.inf), "label": np.where(hit, LABEL_MESH, LABEL_NONE)}
+        return {"t": np.where(hit, t, min(self.far_m, SKY_RANGE_M)), "label": np.where(hit, LABEL_MESH, LABEL_FAR)}
+
+
+def test_the_horizon_shell_has_no_gap_where_the_ground_falls_away_nor_at_the_zenith():
+    """1.0.5 (Christian, 22 Nov 2026, in the headset: "a black semi circle behind skinner ridge and the others"): the
+    shell began at the angle of 17 m on LEVEL ground at every azimuth; downhill the ground at that angle is far beyond
+    the near terrain's end and the band between had no triangle.  And a far surface close overhead (105 m at Skinner
+    Ridge) put the last ring within 17 m of the axis: no sky in a wedge at the zenith.  Every direction whose surface
+    is beyond the near terrain now meets the shell."""
+    from rpp.ibr import station_mesh as SM
+    up, north, east = np.array([0.0, 0.0, 1.0]), np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0])
+    C = np.array([0.0, 0.0, 2.0])
+    for far_m in (100.0, None):
+        sc = _SlopeScene(C, far_m)
+        sh = SM.horizon_shell(sc, C, C, up, north, east)
+        rc = SM._raycaster(sh["V"], sh["F"])
+        az, el = np.meshgrid(np.radians(np.arange(0.25, 360.0, 2.0)), np.radians(np.r_[np.arange(-45.0, 0.0, 0.5), 30.0, 60.0, 85.0, 89.5]))
+        az, el = az.ravel(), el.ravel()
+        D = np.c_[np.cos(el) * np.sin(az), np.cos(el) * np.cos(az), np.sin(el)]
+        O = np.broadcast_to(C, D.shape).copy()
+        true = sc.cast(O, D)
+        X = O + np.where(np.isfinite(true["t"]), np.minimum(true["t"], 1e5), 1e5)[:, None] * D
+        beyond = np.hypot(X[:, 0], X[:, 1]) >= SM.SHELL_FROM_M + 1.0          # the near terrain does not cover it
+        t, _ = SM._cast(rc, O, D)
+        assert beyond.sum() > 2000 and np.isfinite(t[beyond]).all(), (far_m, int((~np.isfinite(t[beyond])).sum()))
+        south = beyond & (np.abs(np.degrees(az) - 180.0) < 20) & (np.degrees(el) < -21.0)
+        assert south.sum() > 20                                               # the band that was black
+        assert np.isfinite(t[np.degrees(el) > 80]).all()                      # ... and the zenith
+        hd = np.hypot(*(sh["V"][:, :2] - C[:2]).T)
+        ground = np.linalg.norm(sh["V"] - C, axis=1) < 60.0
+        assert hd[sh["F"]][ground[sh["F"]].all(axis=1)].max(axis=1).min() >= SM.SHELL_FROM_M - 1.5     # still nothing of the ground under the rover (a quad's other triangle)
+
+
+def test_the_full_3d_sky_is_a_model_of_the_panoramas_sky():
+    """1.0.5 (Christian, 22 Nov 2026, Rockytop in the headset: "the top pole has artifacts in the sky"): above the
+    skyline's circle the texture takes a model of the panorama's sky - one color per elevation (the median over the
+    azimuths, outliers and empty pixels out), the panorama's own color along the circle fading into it - so a dark
+    patch by the zenith and an oval of another color are not carried into the model."""
+    from rpp.ibr import station_mesh as M
+    H, W = 360, 720
+    el = 90.0 - (np.arange(H) + 0.5) * 180.0 / H
+    pano = np.zeros((H, W, 3), np.float32)
+    pano[:] = (200.0 + 0.5 * el)[:, None, None] * np.array([1.0, 0.95, 0.9], np.float32)      # brighter to the zenith
+    yy, xx = np.mgrid[:H, :W]
+    blob = (xx - 60) ** 2 / 50.0 ** 2 + (yy - 40) ** 2 / 25.0 ** 2 < 1                         # a dark red patch at 70 deg
+    pano[blob] = (90.0, 10.0, 5.0)
+    pano[:6] = 0.0                                                                             # nothing at the pole
+    oval = (xx - 400) ** 2 / 120.0 ** 2 + (yy - 120) ** 2 / 20.0 ** 2 < 1                      # another color low in the sky
+    pano[oval] *= np.array([0.93, 0.88, 0.95], np.float32)
+    m = M.sky_model(pano, 20.0)
+    assert m.shape == (180, 360, 3)
+    clean = (200.0 + 0.5 * (90.0 - (np.arange(180) + 0.5)))[:, None, None] * np.array([1.0, 0.95, 0.9])
+    assert np.abs(m[:45] - clean[:45]).max() < 3.0                    # the patch and the empty pole are gone
+    assert np.ptp(m[:30], axis=1).max() < 1.0 and np.ptp(m[:45], axis=1).max() < 4.0   # one color per elevation up there
+    assert np.abs(m[:70] - clean[:70]).max() < 26.0                   # the oval: the panorama's color at the circle, fading - no edge
+    assert np.abs(np.diff(m[:70], axis=1)).max() < 1.0 and np.abs(np.diff(m[:70], axis=0)).max() < 4.0
+    # smooth_sky uses it: the far texels above the circle carry the model, not the patch
+    up, north, east = (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)
+    S, rpx = 512, 250.0
+    knee = (np.pi / 2 + np.radians(20.0), 0.9)
+    yy, xx = np.mgrid[:S, :S]
+    rho = np.hypot(xx + 0.5 - S / 2, S / 2 - (yy + 0.5))
+    far = (rho > float(M._rho_of_theta(np.array([np.pi / 2]), rpx, np.pi, knee)[0])) & (rho <= rpx)
+    rgb = np.full((S, S, 3), 80.0, np.float32)
+    assert M.smooth_sky(rgb, far, S, rpx, knee, pano=(pano, 0.0), frame=(up, north, east)) > 0
+    high = far & (rho > knee[1] * rpx + 3)
+    assert rgb[high][:, 0].min() > 195.0 and (rgb[high][:, 1] > 0.9 * rgb[high][:, 0]).all()   # no dark red texel
+    rgb2 = np.full((S, S, 3), 80.0, np.float32)
+    M.SKY_MODEL = False
+    try:
+        M.smooth_sky(rgb2, far, S, rpx, knee, pano=(pano, 0.0), frame=(up, north, east))
+    finally:
+        M.SKY_MODEL = True
+    assert rgb2[high][:, 0].min() < 120.0                             # (the panorama's own pixels: the patch is there)
+
+
+def _patch(x0, x1, y0, y1, z, step=0.05):
+    xs, ys = np.arange(x0, x1 + 1e-9, step), np.arange(y0, y1 + 1e-9, step)
+    X, Y = np.meshgrid(xs, ys)
+    V = np.c_[X.ravel(), Y.ravel(), np.full(X.size, float(z))]
+    ny, nx = X.shape
+    i, j = np.meshgrid(np.arange(ny - 1), np.arange(nx - 1), indexing="ij")
+    a = (i * nx + j).ravel()
+    return V, np.r_[np.c_[a, a + 1, a + nx], np.c_[a + 1, a + nx + 1, a + nx]]
+
+
+def test_a_floater_on_a_post_is_lowered_and_a_ledge_and_a_boulders_overhang_stay(monkeypatch):
+    """1.0.5 (Christian, 22 Nov 2026, Wildcat Ridge: "a bad floater attached to the ground in front of the rover"): a
+    sheet in the air on a thin post goes down to the ground under it, the post with it; an outcrop's ledge (held by the
+    hill along its back), a boulder's overhang (smaller than the boulder) and a slab with the ground inside it (the
+    mast does not see that ground) stay as they are."""
+    from rpp.ibr import station_mesh as SM
+    monkeypatch.setattr(SM, "TOP_ROCK_P95_MM", 1e6)
+    Vg, Fg = _grid(n=241, half=12.0)                                  # the ground, z = 0, with ...
+    Vg[Vg[:, 0] <= -5.0 + 1e-9, 2] = 1.0                              # ... a hill 1 m high west of x = -5 (one sheet)
+    Vg[(np.abs(Vg[:, 0]) <= 0.5 + 1e-9) & (np.abs(Vg[:, 1] - 6.5) <= 0.5 + 1e-9), 2] = 0.9      # ... and a boulder 1 m x 1 m
+    Vg[(np.abs(Vg[:, 0] - 5.5) < 1e-6) & (np.abs(Vg[:, 1]) < 1e-6), 2] = 1.47                   # ... and a spike 1.47 m high:
+    parts = [(Vg, Fg)]                                                # the post of ...
+    parts.append(_patch(4.0, 7.0, -0.5, 0.5, 1.5))                    # ... the floater: 3 m x 1 m, 1.5 m up
+    parts.append(_patch(-5.0, -4.2, -9.0, -5.0, 1.0))                 # the hill's ledge, 0.8 m out over the ground
+    parts.append(_patch(0.5, 0.9, 6.0, 7.0, 0.9))                     # the boulder's overhang, 0.4 m
+    parts.append(_box([-2.0, -8.0, 0.25], [2.0, 2.0, 0.5]))           # a slab with the ground under it, walled in
+    V, F, n = [], [], 0
+    for v, f in parts:
+        V.append(v)
+        F.append(np.asarray(f) + n)
+        n += len(v)
+    V, F = np.vstack(V), np.vstack(F)
+    P, up = np.array([0.0, 0.0, 2.0]), np.array([0.0, 0.0, 1.0])
+    Vt, Ft, rec = SM.top_sheet(V, F, P, up, 11.5, 60000, step_m=0.05)
+    fl = rec["floaters"]
+    assert fl["pieces"] == 1 and 2.5 < fl["m2"] < 3.6 and fl["largest"][0]["held"] < 0.05 and fl["largest"][0]["seen_under"] > 0.8
+    assert fl["pieces_kept"] >= 3 and fl["posts_lowered"] >= 1
+    rc = SM._raycaster(Vt, Ft)
+
+    def height(x, y):
+        t, _ = SM._cast(rc, np.array([[x, y, 50.0]]), np.array([[0.0, 0.0, -1.0]]))
+        return 50.0 - float(t[0]) - P[2] + P[2]
+    assert max(abs(height(x, y)) for x in (4.3, 5.0, 5.5, 6.0, 6.7) for y in (-0.3, 0.0, 0.3)) < 0.08     # the floater and its post: gone
+    assert min(height(x, -7.0) for x in (-8.0, -6.0, -4.9, -4.5)) > 0.9                                   # the ledge stays ...
+    assert min(height(x, 6.5) for x in (0.0, 0.3, 0.6, 0.8)) > 0.8                                        # ... the boulder's overhang ...
+    assert height(-2.0, -8.0) > 0.42                                                                      # ... and the slab
+    monkeypatch.setattr(SM, "TOP_FLOATERS", False)                    # without the rule: the floater is a wall 1.5 m high
+    V0, F0, rec0 = SM.top_sheet(V, F, P, up, 11.5, 60000, step_m=0.05)
+    rc = SM._raycaster(V0, F0)
+    assert "floaters" not in rec0 and height(5.0, 0.0) > 1.4

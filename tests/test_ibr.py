@@ -3267,7 +3267,7 @@ def test_o_looks_along_the_rover_x_and_y_b_home_buttons(tmp_path):
     assert "#compass { position: fixed; right: 12px; top: 8px;" in page and "-Math.PI / 4" not in page
     assert "TEXT_FROM_FORWARD_DEG = 135" in page and "rover_forward_azimuth_deg" in page
     assert 'id="home"' in page and "goHome" in page and "faceAfterLoad = 270" in page
-    assert "pressed(src, 5)" in page and "if (left) goHome(); else stereoOrFull();" in page     # 0.99.41: B stereo / full 3D
+    assert "if (!yDone) goHome();" in page and "if (!bDone) stereoOrFull();" in page     # Y: home; 0.99.41: B stereo / full 3D (1.0.5: a short press; held, the drive)
     assert "q.key === 'masked'" in page and "#VRButton.rpv-big" in page and "isSessionSupported('immersive-vr')" in page
     assert "`Sol ${sols[0]}`" in page and "`sol ${" not in page
 

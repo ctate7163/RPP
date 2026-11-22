@@ -171,6 +171,139 @@ def _range_warp(X: np.ndarray, P: np.ndarray, back: bool = False) -> np.ndarray:
     return P + v * np.where(r > near_m, (np.maximum(r, 1e-12) / near_m) ** -power, 1.0)[:, None]
 
 
+TOP_FLOATERS = True             # 1.0.5: the top surface is not taken where it floats (see under_floaters)
+TOP_FLOATER_AIR_M = 0.4         # ... with this much air under it
+TOP_FLOATER_THICK_M = 0.6       # ... and is no thicker than this itself (a hill's overhang is thicker)
+TOP_FLOATER_LAYERS = 4          # the surfaces looked at under the top one
+TOP_FLOATER_MIN_M2 = 0.05       # a floating piece smaller than this stays (a rock's rim)
+TOP_FLOATER_JOIN_M = 0.15       # the ground beside a piece is joined to it when their heights differ by less ...
+TOP_FLOATER_BROAD_M = 1.5       # ... and holds it when it is no narrower than this (a post or a pillar holds nothing)
+TOP_FLOATER_PROUD_M = 0.3       # (narrower: it stands this much above the ground opened at that width)
+TOP_FLOATER_HELD = 0.1          # a piece held along less than this share of its rim ...
+TOP_FLOATER_OVER = 2.0          # ... and this many times larger than the narrow thing it stands on is a floater ...
+TOP_FLOATER_SEEN = 0.5          # ... when the mast sees the surface beneath it under this share of it or more
+TOP_POST_NEAR_M = 0.5           # what held a floater - within this of where it was - is lowered when it is ...
+TOP_POSTS = ((0.35, 0.2), (0.7, 0.7), (1.4, 2.1))    # ... narrower than (width m) and taller than (height m): a post
+
+
+def under_floaters(rc, base: np.ndarray, h: np.ndarray, hit: np.ndarray, inside: np.ndarray, pivot: np.ndarray,
+                   up: np.ndarray, step_m: float) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """1.0.5 (Christian, 22 Nov 2026, Wildcat Ridge Sol0502: "a bad floater attached to the ground in front of the
+    rover" - a sheet 5.4 m long and 1.3 m wide hanging 2 m over the slope at the mast's height, held to the ground
+    by a thin post, so that no rule for loose pieces took it; Rockytop has one 17 m out on a pillar).  ``h`` (n,):
+    the top surface's height above the pivot along ``up`` over the places ``base`` (n, 3; at the pivot's level),
+    which are the True cells of the grid ``inside``; returned lowered to the surface beneath where the top one
+    FLOATS:
+
+    * a place floats when under it, within ``TOP_FLOATER_THICK_M``, the mesh ends and ``TOP_FLOATER_AIR_M`` or more
+      of air follows before the next surface (up to ``TOP_FLOATER_LAYERS`` surfaces are looked at);
+    * the floating places that touch are one piece, and a piece is a floater when the ground does not hold it:
+      along its rim, the cells beside it that are at its height (``TOP_FLOATER_JOIN_M``) AND are broad ground
+      (not narrower than ``TOP_FLOATER_BROAD_M``) are less than ``TOP_FLOATER_HELD`` of the rim, AND the piece
+      is more than ``TOP_FLOATER_OVER`` times as large as the narrow thing it is joined to.  A ledge of an outcrop
+      floats too, but the hill holds it along its back, and a boulder's overhang is smaller than the boulder: both
+      stay whole (the first rule lowered every floating place the mast saw under - Skinner Ridge's ledges came out
+      as teeth; the second took the overhang off a boulder 3.5 m from the rover there);
+    * and the mast SEES the surface beneath it under ``TOP_FLOATER_SEEN`` of the piece or more: the ground under a
+      floater was measured through the place where the floater would be solid - so it is not.  What lies inside or
+      beneath a solid thing (another sheet of the mesh, the fill) is hidden by the thing and does not pass;
+    * what held a floater is lowered with it: within ``TOP_POST_NEAR_M`` of where it was, a thing narrower and
+      taller than a pair of ``TOP_POSTS`` goes down to the ground around it.
+
+    Returns (h, record)."""
+    from scipy import ndimage as ndi
+    n = len(h)
+    cur = np.asarray(h, float).copy()                           # the surface the walk is at
+    roof = cur.copy()                                           # the top one
+    out = cur.copy()
+    alive = np.asarray(hit, bool).copy()
+    low = np.zeros(n, bool)
+    seen = np.zeros(n, bool)
+    for _ in range(int(TOP_FLOATER_LAYERS)):
+        i = np.flatnonzero(alive)
+        if not len(i):
+            break
+        o = base[i] + (cur[i] - 0.02)[:, None] * up
+        t, _ = _cast(rc, o, np.broadcast_to(-up, o.shape))
+        nxt = cur[i] - 0.02 - t
+        got = np.isfinite(t)
+        air = got & (t + 0.02 >= TOP_FLOATER_AIR_M) & (roof[i] - cur[i] <= TOP_FLOATER_THICK_M)
+        j = i[air]
+        out[j] = nxt[air]
+        low[j] = True
+        roof[j] = out[j]                                        # the walk goes on from there: a floater over a floater
+        if len(j):                                              # does the mast see the surface beneath?
+            seen[j] = seen_from(rc, base[j] + (out[j] + 0.03)[:, None] * up, pivot)
+        cur[i] = np.where(got, nxt, cur[i])
+        alive[i] = got
+    rec: Dict[str, Any] = {"floating_places": int(low.sum()), "air_m": TOP_FLOATER_AIR_M, "thick_m": TOP_FLOATER_THICK_M,
+                           "held": TOP_FLOATER_HELD, "pieces": 0, "pieces_kept": 0, "places": 0, "m2": 0.0, "posts_lowered": 0}
+    if not low.any():
+        return np.asarray(h, float).copy(), rec
+    g = float(step_m)
+    H = np.full(inside.shape, -1e4)
+    H[inside] = np.asarray(h, float)
+    Hl = H.copy()
+    Hl[inside] = out
+    M = np.zeros(inside.shape, bool)
+    M[inside] = low
+    Sn = np.zeros(inside.shape, bool)
+    Sn[inside] = seen
+    have = H > -5e3
+    kb = max(3, int(round(TOP_FLOATER_BROAD_M / g)) | 1)
+    Hop = ndi.grey_opening(np.where(have, H, -1e4), size=(kb, kb))   # the ground without what is narrower than "broad"
+    lab, k = ndi.label(M, structure=np.ones((3, 3), bool))
+    sizes = np.bincount(lab.ravel(), minlength=k + 1)
+    least = max(2, int(np.ceil(TOP_FLOATER_MIN_M2 / (g * g))))
+    gone = np.zeros(inside.shape, bool)
+    took = []
+    pad = kb // 2 + 2
+    proud_all = have & (H - Hop > TOP_FLOATER_PROUD_M)          # what stands on the ground and is narrower than "broad"
+    for c, sl in enumerate(ndi.find_objects(lab), start=1):
+        if sl is None or sizes[c] < least:
+            continue
+        sl = tuple(slice(max(0, a.start - pad), min(dim, a.stop + pad)) for a, dim in zip(sl, inside.shape))
+        comp = lab[sl] == c
+        stand = 0.0
+        rim = ndi.binary_dilation(comp, structure=np.ones((3, 3), bool)) & ~comp & have[sl]
+        if not rim.any():
+            held = 0.0
+        else:
+            beside = ndi.grey_dilation(np.where(comp, H[sl], -1e4), size=(3, 3))      # the piece's height next to a rim cell
+            joined = rim & (np.abs(H[sl] - beside) <= TOP_FLOATER_JOIN_M)
+            broad = joined & (H[sl] - Hop[sl] <= TOP_FLOATER_PROUD_M)
+            held = float(broad.sum()) / float(rim.sum())
+            if held < TOP_FLOATER_HELD and (joined & ~broad).any():      # the narrow thing it is joined to: how large?
+                body, _ = ndi.label(proud_all[sl] & ~comp, structure=np.ones((3, 3), bool))
+                ids = np.unique(body[joined & ~broad])
+                stand = float(np.isin(body, ids[ids > 0]).sum())
+        under = float(Sn[sl][comp].mean())
+        if held >= TOP_FLOATER_HELD or float(comp.sum()) <= TOP_FLOATER_OVER * stand or under < TOP_FLOATER_SEEN:
+            rec["pieces_kept"] += 1
+            continue
+        gone[sl] |= comp
+        ii, jj = np.nonzero(comp)
+        took.append({"m2": round(float(comp.sum()) * g * g, 2), "held": round(held, 2), "stands_on_m2": round(stand * g * g, 2),
+                     "seen_under": round(under, 2),
+                     "lowered_by_m_max": round(float((H[sl] - Hl[sl])[comp].max()), 2),
+                     "cell": [int(ii.mean()) + sl[0].start, int(jj.mean()) + sl[1].start]})
+    if not gone.any():
+        return np.asarray(h, float).copy(), rec
+    H2 = np.where(gone, Hl, H)
+    near = ndi.binary_dilation(gone, iterations=max(1, int(round(TOP_POST_NEAR_M / g)))) & have
+    posts = np.zeros(inside.shape, bool)
+    for width_m, tall_m in TOP_POSTS:                           # the narrowest first: a thin post, then a pillar
+        ks = max(3, int(round(width_m / g)) | 1)
+        Ho = ndi.grey_opening(np.where(have, H2, 1e4), size=(ks, ks))
+        post = near & (Ho < 5e3) & (H2 - Ho > tall_m)
+        H2 = np.where(post, Ho, H2)
+        posts |= post
+    took.sort(key=lambda r: -r["m2"])
+    rec.update(pieces=len(took), places=int(gone.sum()), m2=round(float(gone.sum()) * g * g, 2),
+               posts_lowered=int(posts.sum()), largest=took[:5])
+    return H2[inside], rec
+
+
 def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: int, fill: Optional[np.ndarray] = None,
               step_m: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """1.0.5 (Christian, 21 and 22 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; "Van zyl looks a lot
@@ -209,11 +342,17 @@ def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: 
     for i in range(0, len(o), 2_000_000):
         t[i:i + 2_000_000], pid[i:i + 2_000_000] = _cast(rc, o[i:i + 2_000_000], np.broadcast_to(-u, o[i:i + 2_000_000].shape))
     hit = np.isfinite(t)
-    H = np.full(A.shape, -1e4, np.float32)
-    H[inside] = np.where(hit, top - t, -1e4)
+    h = np.where(hit, top - t, -1e4)
     rec: Dict[str, Any] = {"step_m": g, "cells": int(inside.sum()), "no_surface": int((~hit).sum())}
     if fill is not None and len(fill) == len(F):
         rec["on_fill"] = int(fill[pid[hit]].sum())
+    if TOP_FLOATERS:
+        try:
+            h, rec["floaters"] = under_floaters(rc, o - top * u, h, hit, inside, P, u, g)
+        except Exception as e:                                  # noqa: BLE001 - the top surface as it is
+            log.warning("station mesh: the floaters' check failed (%s) - the top surface as it is", e)
+    H = np.full(A.shape, -1e4, np.float32)
+    H[inside] = h
     k = max(3, int(round(TOP_PIT_WIDTH_M / g)) | 1)
     Hc = ndi.grey_closing(H, size=(k, k))
     pit = (Hc - H > TOP_PIT_DEPTH_M) & (H > -5e3)
@@ -804,6 +943,60 @@ def pano_sky(pano: np.ndarray, azimuth0_deg: float, d: np.ndarray, up, north, ea
     return (P[ya, xa, :3] * (1 - fx) + P[ya, xb, :3] * fx) * (1 - fy) + (P[yb, xa, :3] * (1 - fx) + P[yb, xb, :3] * fx) * fy
 
 
+SKY_MODEL = True                # 1.0.5: above the skyline's circle the sky is a model of the panorama's (see sky_model)
+SKY_MODEL_OUTLIER = 0.2         # a sky pixel this far (relative) from its row's median brightness is left out
+SKY_MODEL_FADE_DEG = 12.0       # the sky's own color along the circle fades into the rows' color over this elevation
+
+
+def sky_model(pano: np.ndarray, circle_el_deg: float) -> np.ndarray:
+    """1.0.5 (Christian, 22 Nov 2026, Rockytop in the headset: "the top pole has artifacts in the sky" - a dark red
+    patch by the zenith where the panorama has no sky of its own; Wildcat Ridge: a violet oval over the ridge, the
+    sky the frames show beside the white the panorama fills in): the panorama's sky above ``circle_el_deg`` as a
+    smooth model, (180, 360, 3) at one degree per pixel in the panorama's layout.
+
+    * every degree of elevation has ONE color: the median of its pixels over all azimuths, without those that are
+      empty or more than ``SKY_MODEL_OUTLIER`` off the row's brightness; a row with too few takes the row beneath;
+    * along the circle the sky keeps the color the panorama has there in each direction (smoothed over azimuth), so
+      it meets the imaged sky below the circle without a step, and that difference fades out over
+      ``SKY_MODEL_FADE_DEG`` above it."""
+    import cv2
+    from scipy import ndimage as ndi
+    P = np.asarray(pano, np.float32)[..., :3]
+    small = cv2.resize(P, (360, 180), interpolation=cv2.INTER_AREA).astype(np.float64)
+    lum = small.sum(axis=2)
+    ec = int(np.clip(round(90.0 - float(circle_el_deg)), 2, 178))        # the circle's row (row 0: the zenith)
+    prof = np.full((180, 3), np.nan)
+    for r in range(0, ec + 3):
+        v = lum[r] > 0
+        if v.sum() < 30:
+            continue
+        med = np.median(lum[r][v])
+        inl = v & (np.abs(lum[r] - med) <= SKY_MODEL_OUTLIER * med)
+        if inl.sum() >= 30:
+            prof[r] = np.median(small[r][inl], axis=0)
+    have = np.flatnonzero(np.isfinite(prof[:, 0]))
+    if not len(have):
+        raise ValueError("the panorama has no sky above the skyline's circle")
+    for r in range(ec + 2, -1, -1):                              # an empty row: the row beneath it (toward the circle)
+        if not np.isfinite(prof[r, 0]):
+            below = have[have > r]
+            prof[r] = prof[below.min()] if len(below) else prof[have.max()]
+    prof[: ec + 3] = ndi.uniform_filter1d(prof[: ec + 3], size=5, axis=0, mode="nearest")
+    # the sky's own color along the circle, by azimuth: a robust band just above it, smoothed around the compass
+    band = small[max(ec - 3, 0): ec + 1]
+    anchor = np.median(band, axis=0)                             # (360, 3)
+    ref = prof[max(ec - 1, 0)]
+    okc = (anchor.sum(axis=1) > 0) & (np.abs(anchor.sum(axis=1) - ref.sum()) <= 2 * SKY_MODEL_OUTLIER * ref.sum())
+    delta = np.where(okc[:, None], anchor - ref, 0.0)
+    wgt = ndi.gaussian_filter1d(okc.astype(float), 8.0, mode="wrap")
+    delta = ndi.gaussian_filter1d(delta, 8.0, axis=0, mode="wrap") / np.maximum(wgt, 1e-3)[:, None] * (wgt > 0.05)[:, None]
+    out = np.repeat(prof[:, None, :], 360, axis=1)
+    rows = np.arange(180)
+    fade = np.exp(-np.clip(ec - rows, 0, None) / float(SKY_MODEL_FADE_DEG))
+    out += delta[None, :, :] * fade[:, None, None]
+    return np.maximum(out, 0.0).astype(np.float32)
+
+
 def smooth_sky(rgb: np.ndarray, far: np.ndarray, size: int, rpx: float, knee, feather_deg: float = SKY_FEATHER_DEG,
                sigma_deg: float = SKY_SMOOTH_DEG, pano=None, frame=None) -> int:
     """1.0.1 (Christian, 21 Nov 2026: "use the panoramas own sky instead of white. Make sure that artifacts above the sky
@@ -844,7 +1037,13 @@ def smooth_sky(rgb: np.ndarray, far: np.ndarray, size: int, rpx: float, knee, fe
     if pano is not None and frame is not None:
         try:
             d, _ = disc_dirs(ys, xs, size, rpx, np.pi, frame[0], frame[1], frame[2], knee=knee)
-            col = pano_sky(pano[0], float(pano[1]), np.asarray(d, float), *frame)
+            src = pano[0]
+            if SKY_MODEL:                                        # 1.0.5: not the panorama's pixels - a model of its sky
+                try:
+                    src = sky_model(pano[0], float(np.degrees(tk)) - 90.0)
+                except Exception as e:                           # noqa: BLE001 - the panorama's own pixels
+                    log.warning("station mesh: no model of the panorama's sky (%s) - its own pixels", e)
+            col = pano_sky(src, float(pano[1]), np.asarray(d, float), *frame)
             ok = np.isfinite(col).all(axis=1) & (col.max(axis=1) > 0)
             t = np.where(ok, t, 0.0).astype(np.float32)          # where the panorama has nothing, the texel stays
             rgb[ys, xs] = rgb[ys, xs] * (1.0 - t[:, None]) + np.nan_to_num(col).astype(np.float32) * t[:, None]
@@ -1226,6 +1425,21 @@ def horizon_shell(scene, C, pivot, up, north, east, from_m: float = SHELL_FROM_M
     h_c = float(t_down[0]) if t_down[0] < dome_m else 2.5
     th0 = max(np.radians(20.0), float(np.arctan2(from_m, h_c)) - np.radians(3.0))
     ph_c = np.radians(np.arange(0.0, 360.0, 1.0))
+    # 1.0.5 (Christian, 22 Nov 2026, Skinner Ridge and Wildcat Ridge: "a black semi circle"): the first ring was at
+    # the angle of ``from_m`` on LEVEL ground under C, the same for every azimuth.  Where the ground falls away, the
+    # surface at that angle is far beyond the near terrain's end (Skinner Ridge, to the south: 32 m at -10 deg, the
+    # terrain ends at 20 m) and the band between had no triangle - black in the viewer from east through south to
+    # west.  The first ring is now the lowest angle at which any azimuth's ray is ``from_m`` away (the quads nearer
+    # than that are left out below, as before)
+    th_s = np.arange(np.radians(20.0), th0 + 1e-9, np.radians(0.5))
+    if len(th_s):
+        TS, PS = np.meshgrid(th_s, ph_c, indexing="ij")
+        d_s, t_s, _ = cast(TS.ravel(), PS.ravel())
+        Xs = d_s * t_s[:, None]
+        hd_s = np.linalg.norm(Xs - (Xs @ up)[:, None] * up, axis=1).reshape(TS.shape)
+        reach = (hd_s >= from_m - 1.0) & (t_s.reshape(TS.shape) < dome_m)
+        if reach.any():
+            th0 = max(np.radians(20.0), float(th_s[np.flatnonzero(reach.any(axis=1)).min()]) - np.radians(1.0))
     th_c = np.arange(th0, np.pi - 1e-6, np.radians(0.25))
     TT, PP = np.meshgrid(th_c, ph_c, indexing="ij")
     _, _, sky_c = cast(TT.ravel(), PP.ravel())
@@ -1240,14 +1454,21 @@ def horizon_shell(scene, C, pivot, up, north, east, from_m: float = SHELL_FROM_M
     d, t, sky_f = cast(TT.ravel(), PP.ravel())
     low = (t >= dome_m) & (TT.ravel() < np.pi / 2 - 1e-3)        # a ray below the horizontal that meets nothing (a gap
     t[low] = np.minimum(dome_m, h_c / np.cos(TT.ravel()[low]))   # in the scene): on the level ground under C, not the sky
+    t2, low2 = t.reshape(nr, na), low.reshape(nr, na)            # 1.0.5: ... and not nearer than the ring beneath it -
+    for i in range(1, nr):                                       # where the ground falls away, level ground under C is
+        t2[i] = np.where(low2[i], np.maximum(t2[i], t2[i - 1]), t2[i])   # nearer than the terrain's end: a gap again
     V = C + d * t[:, None]
     hd = np.linalg.norm((V - np.asarray(pivot, float)) - ((V - np.asarray(pivot, float)) @ up)[:, None] * up, axis=1).reshape(nr, na)
     F = []
     j = np.arange(na)
     j1 = (j + 1) % na
+    # 1.0.5: a corner on the far surface or the sky is the shell's however near the mast axis it is (Skinner Ridge: the
+    # far surface is 105 m overhead, 15 m from the axis at 82 deg - no sky in a wedge at the zenith)
+    beyond = sky_f.reshape(nr, na)
     for i in range(nr - 2, -1, -1):                              # the outer rings first
         a_, b_, c_, d_ = i * na + j, i * na + j1, (i + 1) * na + j1, (i + 1) * na + j
         far = (hd[i, j] >= from_m) | (hd[i, j1] >= from_m) | (hd[i + 1, j] >= from_m) | (hd[i + 1, j1] >= from_m)
+        far |= beyond[i, j] | beyond[i, j1] | beyond[i + 1, j] | beyond[i + 1, j1]
         F.append(np.stack([a_[far], b_[far], c_[far]], 1))
         F.append(np.stack([a_[far], c_[far], d_[far]], 1))
     F = np.vstack(F).astype(np.int64)
