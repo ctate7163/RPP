@@ -1374,6 +1374,46 @@ def _boundary_edges(F: np.ndarray) -> np.ndarray:
     return E[cnt[inv.ravel()] == 1]
 
 
+TIDY_ZIP_M = 0.12                # 1.0.4: a crack between two edges of the measured surface this wide (x range / 4 m beyond
+TIDY_ZIP_TO_M = 20.0             # 4 m) is bridged, within this of the mast axis
+
+
+def zip_cracks(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], up: Sequence[float], width_m: float = TIDY_ZIP_M,
+               to_m: float = TIDY_ZIP_TO_M) -> np.ndarray:
+    """Triangles (k, 3) that bridge the cracks of the surface ``F``: every boundary edge gets a triangle to the
+    nearest boundary vertex of another boundary loop within ``width_m`` (x range / 4 m beyond 4 m).  Van Zyl, the
+    rock at 3.9 m: where the height field hands a steep face to the Poisson patch the two meet edge to edge without
+    shared vertices - a ring of cracks around the face, the fill showing through.  Both rims get their triangles, so
+    the strip is covered twice; they lie in the surface."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components as cc
+    from scipy.spatial import cKDTree
+    B = _boundary_edges(np.asarray(F, np.int64))
+    if not len(B):
+        return np.zeros((0, 3), np.int64)
+    _, loop = cc(coo_matrix((np.ones(len(B), np.int8), (B[:, 0], B[:, 1])), shape=(len(V), len(V))), directed=False)
+    bv = np.unique(B)
+    tree = cKDTree(V[bv])
+    mid = 0.5 * (V[B[:, 0]] + V[B[:, 1]])
+    r = horizontal_distance(mid, np.asarray(pivot, float), up)
+    lim = width_m * np.maximum(1.0, r / 4.0)
+    q = r < to_m
+    d, j = tree.query(mid[q], k=64, distance_upper_bound=float(lim[q].max()) if q.any() else width_m)
+    eb = B[q]
+    out = []
+    ok_any = np.zeros(len(eb), bool)
+    pick = np.zeros(len(eb), np.int64)
+    for k in range(d.shape[1]):
+        good = np.isfinite(d[:, k]) & (d[:, k] < lim[q]) & ~ok_any
+        c = bv[np.where(good, j[:, k], 0)]
+        good &= loop[c] != loop[eb[:, 0]]
+        pick[good] = c[good]
+        ok_any |= good
+    if ok_any.any():
+        out.append(np.stack([eb[ok_any, 1], eb[ok_any, 0], pick[ok_any]], 1))
+    return np.concatenate(out) if out else np.zeros((0, 3), np.int64)
+
+
 def close_small_loops(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], max_edges: int = TIDY_LOOP_EDGES,
                       max_diameter_m: float = TIDY_LOOP_DIAMETER_M) -> Tuple[np.ndarray, np.ndarray, int]:
     """Holes of the surface ``F`` that are simple loops of at most ``max_edges`` edges and ``max_diameter_m`` across
@@ -1513,7 +1553,10 @@ def tidy_sheets(V: np.ndarray, F: np.ndarray, n_measured: int, pivot: Sequence[f
         rep["fragments"] = {"triangles": int(frag.sum()), "pieces": int((cnt < TIDY_FRAGMENT_TRIANGLES).sum())}
     Fm, Ff = F[keep & ~is_fill], F[keep & is_fill]
     # 4 small holes closed
-    V2, Fc, loops = close_small_loops(V, Fm, P)
+    Fz = zip_cracks(V, Fm, P, u) if TIDY_ZIP_M > 0 else np.zeros((0, 3), np.int64)   # the cracks between two rims
+    rep["cracks_bridged"] = {"triangles": int(len(Fz)), "width_m": TIDY_ZIP_M}
+    V2, Fc, loops = close_small_loops(V, Fm, P)              # (the small holes: of the surface before the bridges)
+    Fm = np.vstack([Fm, Fz]) if len(Fz) else Fm
     rep["holes_closed"] = {"loops": int(loops), "triangles": int(len(Fc))}
     Fm = np.vstack([Fm, Fc]) if len(Fc) else Fm
     rep.update(measured_out=int(len(Fm)), triangles_out=int(len(Fm) + len(Ff)))

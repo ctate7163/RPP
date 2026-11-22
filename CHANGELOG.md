@@ -16,6 +16,11 @@ The development history before 1.0 is in
   apart); pieces of fewer than 60 triangles are dropped; holes of at most 80 edges and 0.3 m are closed with a fan.
   Measured on Van Zyl (Sol0052): 618 slivers, 91,135 triangles of a lower sheet, 7,680 in 1,020 small pieces, 2,407
   holes closed; rays from four eye places that end on the fill or on nothing: unchanged.
+- Cracks bridged (`zip_cracks`): every boundary edge of the measured surface gets a triangle to the nearest boundary
+  vertex of another boundary loop within 0.12 m (x range / 4 m beyond 4 m).  Found on the Van Zyl rock at 3.9 m,
+  azimuth 45 deg: where the height field hands a steep face to the Poisson patch the two meet without shared
+  vertices - rings of cracks around the rock's faces, the fill showing through, which the viewer mesh's
+  simplification (500,000 triangles to 20 m, 10 cm edges) turns into arcs and flaps.  46,192 triangles on Van Zyl.
 - Not done as first written, because it made holes on Van Zyl: dropping the lower sheet within one piece (it takes
   the ground under a rock's overhang; `TIDY_SAME_PIECE`), by the centroid alone (cracks where two sheets cross;
   `TIDY_WHOLLY`), and dropping the fill's underlay (`TIDY_DROP_FILL`: rays ending on nothing below -10 degrees went
