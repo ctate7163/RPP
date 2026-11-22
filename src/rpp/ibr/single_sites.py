@@ -554,13 +554,31 @@ STATUS_FILE = "single_sites_status.json"
 INSTANCE: Dict[str, Optional[str]] = {"name": None}   # 0.99.50: --instance - its own status file (two runs at once)
 
 
-NOT_IN_CODE_KEY = ("single_sites.py", "web.py", "hf.py")     # the runner and the publishing (panos.json, Hugging Face)
+NOT_IN_CODE_KEY = ("single_sites.py", "web.py", "hf.py",     # the runner and the publishing (panos.json, Hugging Face)
+                   "station_mesh.py")                         # 1.0.5: the full 3D model has its own stamp (model_code)
+
+# 1.0.5: the code of these hashes makes the same meshes, maps and panoramas as the code of the hash they name, so a
+# station made by that one stands.  {this code's hash (code_hash()): the earlier key its records carry}.
+#   1.0.5 against 1.0.4 (9360937dcbf555b7): only the full 3D model changed - rpp/ibr/station_mesh.py, now out of the
+#   hash, and in rpp/ibr/ods.py the lines of the model made alone (--station-mesh-only: the panorama's sky read from
+#   its file, the color skins written).  The stations of the night of 21 Nov get their models again, nothing else.
+SAME_PRODUCTS: Dict[str, str] = {
+    "4f8e7d4b53eb5c2e": "9360937dcbf555b7",
+}
 
 
 def code_key() -> str:
+    """The key of the code the steps run: :func:`code_hash`, or the earlier key it is known to make the same products
+    as (:data:`SAME_PRODUCTS`)."""
+    h = code_hash()
+    return SAME_PRODUCTS.get(h, h)
+
+
+def code_hash() -> str:
     """A hash of the code the steps run (the ``rpp.ibr`` sources and the dense step's): a step is made again when it
     changes, not on every version number.  Not in it: this module and the publishing ones (:data:`NOT_IN_CODE_KEY`,
-    0.99.36: a change to the viewer's list no longer makes the meshes and panoramas again)."""
+    0.99.36: a change to the viewer's list no longer makes the meshes and panoramas again) and, from 1.0.5, the full
+    3D model's module, which stamps its own products (:func:`rpp.ibr.station_mesh.model_code`)."""
     import hashlib
     h = hashlib.sha1()
     here = Path(__file__).resolve().parent
@@ -643,7 +661,21 @@ def station_done(run: Dict[str, Any]) -> bool:
                     return False
             except Exception:                              # noqa: BLE001 - the block cannot be read: not done
                 return False
+        if _wants_model(run, v) and model_stale(vout, v):  # 1.0.5: nor with a full 3D model of other code
+            return False
     return True
+
+
+def _wants_model(run: Dict[str, Any], variant: str) -> bool:
+    return any(c["step"] == "ods" and c["variant"] == variant and "--station-mesh" in c["argv"] for c in run.get("commands", []))
+
+
+def model_stale(vout: PathLike, variant: str) -> bool:
+    """1.0.5: True when the full 3D model's part of this variant (the terrain of the run without the rover, the rover
+    of the run with it) is not there or was made by other code (:func:`rpp.ibr.station_mesh.model_code`)."""
+    from . import station_mesh as SM
+    kinds = ("rover",) if variant == "rover" else (("scape", "terrain") if SM.SCAPE else ("terrain",))
+    return not SM.model_current(vout, kinds)
 
 
 def _CODE_NOW() -> str:
@@ -977,6 +1009,16 @@ def run_all(runs: List[Dict[str, Any]], out_root: PathLike, squares_only: bool =
                             print(f"######## {run['label']} {v}: {step} is up to date - skipped (--force runs it again)", flush=True)
                             codes[v][step] = 0
                             mins.setdefault(v, {})[step] = None
+                            if step == "ods" and "--station-mesh" in c["argv"] and model_stale(vout, v):
+                                # 1.0.5: the panorama stands; its full 3D model is of other code - the model alone
+                                print(f"######## {run['label']} {v}: the full 3D model is made again (its code changed)", flush=True)
+                                _status(out_root, started=t_run, station=run["label"], variant=v, step="model",
+                                        since=time.strftime("%Y-%m-%dT%H:%M:%S"), done=done, stations=[r["label"] for r in runs])
+                                tm = time.time()
+                                rc = _run(["--station-mesh-only" if x == "--station-mesh" else x for x in c["argv"]], fh)
+                                codes[v]["model"] = rc
+                                mins[v]["model"] = (time.time() - tm) / 60
+                                done.append(f"{run['label']} {v} model: exit {rc}, {(time.time() - tm) / 60:.1f} min")
                             continue
                         step_record(vout, step).unlink(missing_ok=True)
                         ods_ran = ods_ran or step == "ods"     # the levels are new: the station's next panorama follows

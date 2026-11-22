@@ -2302,6 +2302,24 @@ def auto_width(rec, names: Sequence[str], scale: float = 1.0, zcam_scale: float 
                "mastcam_z": zcam, "width": w, "panorama_mrad": round(2000.0 * np.pi / w, 4)}
 
 
+def _pano_of_folder(out: PathLike, prefix: Optional[str], k16_of, azimuth0_deg: float):
+    """1.0.5: (the left eye's panorama of ``out`` in the linear units of a render, its first azimuth) from its 16-bit
+    file - for the full 3D texture's sky when the model is made alone (no eye is rendered).  None without the file."""
+    import cv2
+    f = Path(out) / f"{prefix + '_' if prefix else ''}ods_left_16.png"
+    try:
+        if not f.is_file():
+            return None
+        im = cv2.imread(str(f), cv2.IMREAD_UNCHANGED)
+        if im is None or im.ndim != 3:
+            return None
+        k16 = float(k16_of(None))
+        return np.ascontiguousarray(im[..., ::-1]).astype(np.float32) / np.float32(k16), float(azimuth0_deg)
+    except Exception as e:                                       # noqa: BLE001 - the texture's own sky, smoothed
+        log.warning("ods: the panorama %s could not serve the full 3D sky (%s)", f.name, e)
+        return None
+
+
 def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width: Union[int, str] = DEFAULT_WIDTH, ipd_m: float = DEFAULT_IPD_M,
                    families: str = "N", scale: float = 1.0, zcam_scale: float = 1.0, images: Optional[Sequence[str]] = None,
                    rows_per_chunk: int = 128, eyes: Sequence[str] = ("left", "right"), use_masks: bool = True,
@@ -2650,6 +2668,8 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
                         sky_pano = (res["rgb"], float(azimuth0_deg))     # eye rendered last: the sky is far, either serves)
                     except Exception:                    # noqa: BLE001 - no eye in reach: the texture's own, smoothed
                         sky_pano = None
+                    if sky_pano is None and station_mesh == "only":      # 1.0.5: the model alone - the panorama of the
+                        sky_pano = _pano_of_folder(out, prefix, k16_of, azimuth0_deg)      # run before, from its file
                     part = _sm.terrain_part(scene, sources, station, pool, size=_sm.TEXTURE_PX,    # with a smaller mesh"):
                                             target=_sm.TARGET_TRIANGLES, linear=linear,            # the full 3D part
                                             rows_per_chunk=rows_per_chunk, full=True, sky_pano=sky_pano)   # first; the local 3D
@@ -2694,6 +2714,12 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
                 rec_out["render_processes"] = 1
             pool.close()
     if station_mesh == "only":
+        if use_masks and linear and rec_out.get("station_scape") and not rec_out["station_scape"].get("failed"):
+            try:                                         # 1.0.5: the new texture's color skins (the cells moved)
+                from .station_mesh import write_skins
+                write_skins(out, tone_levels_file)
+            except Exception as e:                       # noqa: BLE001
+                log.warning("ods: no color skins of the full 3D texture (%s)", e)
         return rec_out.get("station_mesh") or {}
     if center_depth and depth_rec is None:               # 0.97.11: the depth without the center panorama's colors
         td = time.time()                                 # (Christian, 13 Nov 2026: "skip the center render because it

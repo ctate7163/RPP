@@ -973,3 +973,186 @@ def test_the_full_3d_sky_is_the_panoramas_above_the_skyline():
     n = M.smooth_sky(rgb, far, S, rpx, knee, pano=(flat, 0.0), frame=(up, north, east))
     high = far & (rho > knee[1] * rpx + 2)
     assert n > 0 and np.allclose(rgb[high], 210.0, atol=0.5) and np.allclose(rgb[hill], before)
+
+
+def test_the_viewers_terrain_is_one_sheet_with_smaller_triangles_near_the_rover():
+    """1.0.5 (Christian, 21 and 22 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; "There are still some
+    holes though"): top_sheet makes one sheet of a mesh of several - a ground with a crack in it, a second sheet under
+    the crack and an unsewn box on it: one height per place (the top), the crack raised to its rim, no rim inside the
+    sheet, and smaller triangles near the pivot than far from it."""
+    from rpp.ibr import station_mesh as SM
+    Vg, Fg = _grid(n=241, half=12.0)                                  # 0.1 m cells, z = 0
+    c = Vg[Fg].mean(axis=1)
+    Fg = Fg[~((np.abs(c[:, 0] - 3.05) < 0.05) & (np.abs(c[:, 1]) < 2.0))]        # a crack 10 cm wide, 4 m long
+    Vg = Vg + [0.02, 0.0, 0.0]                                        # (from x = 3.02 to 3.12)
+    Vu, Fu = _grid(n=25, half=12.0)
+    Vu = Vu - [0, 0, 0.2]                                             # the sheet beneath (the fill's underlay)
+    Vb, Fb = _box([0.0, 5.0, 0.3], [1.0, 1.0, 0.6])                   # a rock, not sewn to the ground
+    rng = np.random.default_rng(0)
+    Vg = Vg + np.c_[np.zeros((len(Vg), 2)), 0.01 * rng.standard_normal(len(Vg))]   # rough ground: nothing simplifies away
+    V = np.vstack([Vg, Vu, Vb])
+    F = np.vstack([Fg, Fu + len(Vg), Fb + len(Vg) + len(Vu)])
+    P, up = np.array([0.0, 0.0, 2.0]), np.array([0.0, 0.0, 1.0])
+    Vt, Ft, rec = SM.top_sheet(V, F, P, up, 10.0, 40000, step_m=0.05)
+    assert rec["no_surface"] == 0 and rec["pits_raised"] > 50 and 30000 < len(Ft) <= 40000
+    rc = SM._raycaster(Vt, Ft)
+    xy = rng.uniform(-9, 9, (4000, 2))
+    xy = xy[np.hypot(xy[:, 0], xy[:, 1]) < 9]
+    o = np.c_[xy, np.full(len(xy), 50.0)]
+    t, _ = SM._cast(rc, o, np.broadcast_to(-up, o.shape))
+    z = 50.0 - t
+    box = (np.abs(xy[:, 0]) < 0.4) & (np.abs(xy[:, 1] - 5.0) < 0.4)
+    crack = (np.abs(xy[:, 0] - 3.07) < 0.04) & (np.abs(xy[:, 1]) < 1.8)
+    away = (np.abs(xy[:, 0]) > 0.7) | (np.abs(xy[:, 1] - 5.0) > 0.7)
+    assert np.isfinite(z).all() and np.abs(z[box] - 0.6).max() < 0.02 and np.abs(z[away]).max() < 0.06
+    assert crack.sum() >= 2 and z[crack].min() > -0.06                # not the sheet 0.2 m beneath
+    t2, _ = SM._cast(rc, np.c_[xy, z + 0.05], np.broadcast_to(-up, o.shape))     # nothing under the sheet: one height
+    t3, _ = SM._cast(rc, np.c_[xy, z - 0.02], np.broadcast_to(-up, o.shape))
+    assert np.isfinite(t2).all() and not np.isfinite(t3[away]).any()
+    E = np.sort(np.concatenate([Ft[:, [0, 1]], Ft[:, [1, 2]], Ft[:, [2, 0]]]), axis=1)
+    _, cnt = np.unique(E, axis=0, return_counts=True)
+    rim = np.unique(E, axis=0)[cnt == 1]
+    assert np.hypot(*(Vt[rim].mean(axis=1)[:, :2]).T).min() > 9.5      # the only rim is the sheet's edge
+    cen = Vt[Ft].mean(axis=1)
+    edge = np.linalg.norm(Vt[Ft] - np.roll(Vt[Ft], 1, axis=1), axis=2).max(axis=1)
+    rr = np.hypot(cen[:, 0], cen[:, 1])
+    assert np.median(edge[rr < 3]) < 0.75 * np.median(edge[rr > 7])
+    Xw = SM._range_warp(Vt, P)
+    assert np.abs(SM._range_warp(Xw, P, back=True) - Vt).max() < 1e-9
+
+
+def test_hidden_cells_take_colors_grown_in_from_their_seen_edges():
+    """1.0.5 (Van Zyl: flat, jagged shards on the ground behind rocks): the vertices of hidden triangles take the
+    harmonic interpolation of the seen ones' colors, and a cell's texels no frame colored are interpolated between
+    its corners - a ramp, not one flat color; the texels a frame colored stay."""
+    from rpp.ibr import station_mesh as SM
+    n = 6                                                             # a strip of 5 quads along x; the ends are seen
+    V = np.array([[i, j, 0.0] for i in range(n) for j in range(2)], float)
+    F = np.array([t for i in range(n - 1) for t in ([2 * i, 2 * i + 2, 2 * i + 3], [2 * i, 2 * i + 3, 2 * i + 1])])
+    vis = np.zeros(len(F), bool)
+    vis[[0, 1, len(F) - 2, len(F) - 1]] = True
+    col = np.zeros((len(V), 3))
+    col[V[:, 0] >= n - 2] = 100.0                                     # the far end's seen vertices
+    got = SM.grown_vertex_colors(F, vis, col, default=(50.0, 50.0, 50.0))
+    mid = got[(V[:, 0] == 2) | (V[:, 0] == 3)][:, 0]
+    assert (got[V[:, 0] <= 1] == 0).all() and (got[V[:, 0] >= n - 2] == 100).all()
+    assert 20 < mid.min() < mid.max() < 80 and got[V[:, 0] == 2][:, 0].mean() < got[V[:, 0] == 3][:, 0].mean()
+    lone = SM.grown_vertex_colors(np.array([[0, 1, 2]]), np.array([False]), np.zeros((3, 3)), default=(7.0, 8.0, 9.0))
+    assert np.allclose(lone, [7.0, 8.0, 9.0], atol=1e-3)              # a patch that touches nothing seen: the default
+    size = 64
+    rgb = np.zeros((size, size, 3), np.float32)
+    have = np.zeros((size, size), bool)
+    have[10:12, 10:14] = True
+    rgb[10:12, 10:14] = 5.0
+    cells = {"pos": np.array([[8, 8]]), "wh": np.array([[40, 30]]),
+             "uv": np.array([[[12.0, 12.0], [44.0, 12.0], [12.0, 34.0]]]) / size}
+    k = SM.grow_cells(rgb, have, cells, np.array([[[0.0] * 3, [200.0] * 3, [0.0] * 3]]))
+    assert k == 40 * 30 - 8 and (rgb[10:12, 10:14] == 5.0).all()
+    row = rgb[13, 12:44, 0]
+    assert (np.diff(row) >= -1e-4).all() and row[-1] - row[0] > 150   # a ramp along the edge to the bright corner
+    assert rgb[9, 9, 0] < 5 and np.isfinite(rgb).all()                # the gutter: the nearest of the triangle
+
+
+def test_cells_that_do_not_fit_are_given_up_from_far_to_near(tmp_path, monkeypatch):
+    """1.0.5: a site of many hidden triangles - more cells than fit beside the disc - is not a failure: only those
+    nearer the mast get cells, the others take the disc."""
+    from rpp.ibr import ods as O, station_mesh as SM
+    proj, rec, st, sc = _scene(tmp_path)
+    src = O.station_sources(proj, rec, st, scale=1.0)
+    real = SM.layout_cells
+    seen = []
+
+    def tight(lay, areas, size, disc=None, **kw):
+        seen.append(len(areas))
+        if len(seen) < 3:
+            raise RuntimeError("station mesh: the cells do not fit the texture")
+        return real(lay, areas, size, disc=disc, **kw)
+    monkeypatch.setattr(SM, "layout_cells", tight)
+    tp = SM.terrain_part(sc, src, st, size=512, target=5000)
+    assert tp["record"]["cell_radius_m"] == 5.0 and seen[0] >= seen[1] >= seen[2]
+    assert tp["record"]["top_sheet"]["triangles"] <= 5000 and tp["record"]["under_a_sheet"] == 0
+    assert "grown" in tp["record"]["cell_fill"] or tp["record"]["triangles_in_cells"] == 0
+
+
+def test_the_full_3d_model_is_made_again_alone_when_only_its_code_changed(tmp_path, monkeypatch):
+    """1.0.5: the model's parts carry the hash of the module that makes them; a station whose panoramas stand and
+    whose model is of other code is not done, and the hash of the mesh / panorama code no longer takes the model's
+    module in - with a table of code that makes the same products as an earlier key."""
+    from rpp.ibr import ods as O, single_sites as SS, station_mesh as SM
+    proj, rec, st, sc = _scene(tmp_path)
+    sc.rover_triangles = None
+    monkeypatch.setattr(SM, "TEXTURE_PX", 512)
+    monkeypatch.setattr(SM, "TARGET_TRIANGLES", 5000)
+    out = tmp_path / "Sol0091"
+    out.mkdir()
+    O.render_station(proj, rec, st, sc, out, width=256, scale=1.0, rows_per_chunk=64, station_mesh="only", workers=1, prefix="Sol0091")
+    part = json.loads((out / "Sol0091_station_scape_terrain.json").read_text())
+    assert part["model_code"] == SM.model_code() and part["top_sheet"]["triangles"] <= 5000
+    assert not SS.model_stale(out, "masked") and SS.model_stale(out, "rover")
+    monkeypatch.setattr(SM, "model_code", lambda: "another")
+    assert SS.model_stale(out, "masked")
+    assert "station_mesh.py" in SS.NOT_IN_CODE_KEY
+    monkeypatch.setattr(SS, "SAME_PRODUCTS", {SS.code_hash(): "an-earlier-key"})
+    assert SS.code_key() == "an-earlier-key"
+    monkeypatch.setattr(SS, "SAME_PRODUCTS", {})
+    assert SS.code_key() == SS.code_hash()
+    run = {"out": str(out), "variants": ["masked"], "commands": [{"variant": "masked", "step": "ods", "argv": ["ods", "x", "--station-mesh"]}]}
+    (out / "ods.json").write_text("{}")
+    SS._CODE_CACHE.clear()
+    (out / "step_ods.json").write_text(json.dumps({"exit": 0, "code": SS.code_key()}))
+    assert not SS.station_done(run)                                   # the model is of other code
+    monkeypatch.undo()
+    SS._CODE_CACHE.clear()
+    (out / "step_ods.json").write_text(json.dumps({"exit": 0, "code": SS.code_key()}))
+    assert SS.station_done(run)
+    SS._CODE_CACHE.clear()
+
+
+def test_single_sites_makes_the_model_alone_when_the_panoramas_stand(tmp_path, monkeypatch):
+    """1.0.5: a station whose steps are up to date and whose full 3D model is of other code gets
+    ``rpp ods ... --station-mesh-only`` for each variant - no mesh, no maps, no panorama - and the panoramas' step
+    records are left as they are."""
+    from pathlib import Path
+    from rpp.ibr import single_sites as S, station_mesh as SM
+    work = tmp_path / "blk"
+    (work / "colmap" / "dense_S1").mkdir(parents=True)
+    (work / "colmap" / "dense_S1" / "fused.ply").write_bytes(b"x")
+    cfg = {"stations": {"S1": {"station": "1_2", "work": str(work)}}, "variants": ["rover", "masked"]}
+    ran = []
+
+    def fake(argv, fh):
+        only = "--station-mesh-only" in argv
+        ran.append((argv[0], "--rover" in argv, only))
+        if argv[0] in S.STEP_OUTPUT:
+            out = Path(argv[argv.index("--out") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            if not only:
+                (out / S.STEP_OUTPUT[argv[0]]).write_text("{}")
+            if argv[0] == "ods" and (only or "--station-mesh" in argv):
+                for kind in (("rover",) if "--rover" in argv else ("scape", "terrain")):
+                    (out / f"S1_{SM.PART[kind]}.json").write_text(json.dumps({"model_code": SM.model_code()}))
+        return 0
+    monkeypatch.setattr(S, "_run", fake)
+    out = tmp_path / "o"
+    assert S.run_all(S.plan(cfg, tmp_path, out, station_mesh=True), out) == 0 and len(ran) == 6
+    ran.clear()
+    assert S.run_all(S.plan(cfg, tmp_path, out, station_mesh=True), out) == 0 and ran == [("dense", False, False)]
+    before = {v: S.step_record(out / "S1" / v, "ods").read_text() for v in ("with_rover", "")}
+    monkeypatch.setattr(SM, "model_code", lambda: "the code of a later version")
+    ran.clear()
+    assert S.run_all(S.plan(cfg, tmp_path, out, station_mesh=True), out) == 0
+    assert ran == [("dense", False, False), ("ods", True, True), ("ods", False, True)]
+    assert before == {v: S.step_record(out / "S1" / v, "ods").read_text() for v in ("with_rover", "")}
+    assert "model" in (out / "single_sites_summary.md").read_text()
+    ran.clear()
+    assert S.run_all(S.plan(cfg, tmp_path, out, station_mesh=True), out) == 0 and ran == [("dense", False, False)]
+
+
+def test_1p0p5_stands_on_the_panoramas_of_1p0p4():
+    """1.0.5 changed the full 3D model alone: its mesh / panorama code carries the key of 1.0.4's records.  A change
+    to that code under this version number fails here - give the next version its own key, or its entry in
+    SAME_PRODUCTS when its meshes, maps and panoramas are truly the same."""
+    import rpp
+    from rpp.ibr import single_sites as SS
+    if rpp.__version__ == "1.0.5":
+        assert SS.code_key() == "9360937dcbf555b7" and SS.code_hash() != SS.code_key()

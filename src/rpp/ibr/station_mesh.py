@@ -146,8 +146,101 @@ def page_frame(X: np.ndarray, pivot, east, up, north) -> np.ndarray:
 
 
 # ------------------------------------------------------------------------------------------- geometry
+TOP_SHEET = True                # 1.0.5: the viewer's terrain is the mesh's top surface, one sheet (see top_sheet)
+TOP_STEP_M = 0.025              # ... sampled on a grid of this step
+TOP_PIT_WIDTH_M = 0.12          # a pit narrower than this ...
+TOP_PIT_DEPTH_M = 0.04          # ... and deeper than this is a crack between two sheets: raised to its rim
+TOP_NEAR_M = 2.0                # the simplified triangles are of one size within this of the mast axis ...
+TOP_RANGE_POWER = 0.6           # ... and grow with the range to this power beyond (0: one size everywhere)
+
+
+def _range_warp(X: np.ndarray, P: np.ndarray, back: bool = False, near_m: float = TOP_NEAR_M, power: float = TOP_RANGE_POWER) -> np.ndarray:
+    """The points about ``P`` scaled by (range / near_m) ** -power beyond ``near_m`` (range in 3D from P), or back.
+    Simplifying in the scaled space leaves triangles that grow with the range: more of them near the rover."""
+    v = np.asarray(X, float) - P
+    r = np.linalg.norm(v, axis=1)
+    if back:
+        r0 = np.where(r > near_m, near_m * (np.maximum(r, 1e-12) / near_m) ** (1.0 / (1.0 - power)), r)
+        return P + v * (r0 / np.maximum(r, 1e-12))[:, None]
+    return P + v * np.where(r > near_m, (np.maximum(r, 1e-12) / near_m) ** -power, 1.0)[:, None]
+
+
+def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: int, fill: Optional[np.ndarray] = None,
+              step_m: float = TOP_STEP_M) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """1.0.5 (Christian, 21 and 22 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; "Van zyl looks a lot
+    better. There are still some holes though"): the viewer's terrain as ONE sheet - the top surface of the mesh
+    (V, F), sampled straight down on a grid of ``step_m`` and simplified to ``target`` triangles.
+
+    The station's mesh is several surfaces that are not sewn: the height field near the rover, the Poisson patches on
+    its steep faces, the zones beyond, the fill and its underlay.  Simplified as they were (2.5 million triangles to
+    500,000) their rims, cracks and overlaps became the arcs, flaps and see-through holes at Van Zyl's rocks, and the
+    triangles came out one size (10 cm) from the wheels to 20 m.  A sheet with one height per place has no rims inside
+    it and no second sheet to show through; what it gives up is the underside of an overhang.
+
+    * a grid cell takes the highest surface under it; a narrow pit (a crack fell through to the sheet beneath) is
+      raised to its rim (``TOP_PIT_WIDTH_M``, ``TOP_PIT_DEPTH_M``);
+    * each cell is cut along the diagonal of the smaller height step, so a rock's edge stays straight;
+    * the triangles are simplified in a space scaled by the range (:func:`_range_warp`): small near the rover, larger
+      far off, where the texture is coarser too.
+
+    ``fill``: True for the triangles of the fill (reported only).  Returns (V, F, record)."""
+    import open3d as o3d
+    from scipy import ndimage as ndi
+    P, u = np.asarray(pivot, float), _unit(up)
+    e1 = _unit(np.cross(u, [1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.cross(u, [0.0, 1.0, 0.0]))
+    e2 = np.cross(u, e1)
+    R, g = float(radius_m), float(step_m)
+    n = int(2 * R / g) + 1
+    ax = -R + g * np.arange(n)
+    A, B = np.meshgrid(ax, ax)
+    inside = np.hypot(A, B) <= R
+    hv = (np.asarray(V, float) - P) @ u
+    top = float(hv.max()) + 5.0
+    o = P + A[inside][:, None] * e1 + B[inside][:, None] * e2 + top * u
+    rc = _raycaster(V, F)
+    t = np.empty(len(o))
+    pid = np.empty(len(o), np.int64)
+    for i in range(0, len(o), 2_000_000):
+        t[i:i + 2_000_000], pid[i:i + 2_000_000] = _cast(rc, o[i:i + 2_000_000], np.broadcast_to(-u, o[i:i + 2_000_000].shape))
+    hit = np.isfinite(t)
+    H = np.full(A.shape, -1e4, np.float32)
+    H[inside] = np.where(hit, top - t, -1e4)
+    rec: Dict[str, Any] = {"step_m": g, "cells": int(inside.sum()), "no_surface": int((~hit).sum())}
+    if fill is not None and len(fill) == len(F):
+        rec["on_fill"] = int(fill[pid[hit]].sum())
+    k = max(3, int(round(TOP_PIT_WIDTH_M / g)) | 1)
+    Hc = ndi.grey_closing(H, size=(k, k))
+    pit = (Hc - H > TOP_PIT_DEPTH_M) & (H > -5e3)
+    H = np.where(pit, Hc, H)
+    rec["pits_raised"] = int(pit.sum())
+    ok = inside & (H > -5e3)
+    idx = np.full(A.shape, -1, np.int64)
+    idx[ok] = np.arange(int(ok.sum()))
+    Vn = P + A[ok][:, None] * e1 + B[ok][:, None] * e2 + H[ok].astype(float)[:, None] * u
+    a_, b_, c_, d_ = idx[:-1, :-1], idx[:-1, 1:], idx[1:, :-1], idx[1:, 1:]
+    q = (a_ >= 0) & (b_ >= 0) & (c_ >= 0) & (d_ >= 0)
+    dg = np.abs(H[:-1, :-1] - H[1:, 1:]) <= np.abs(H[:-1, 1:] - H[1:, :-1])
+    q1, q2 = q & dg, q & ~dg
+    Fn = np.concatenate([np.stack([a_[q1], d_[q1], c_[q1]], 1), np.stack([a_[q1], b_[q1], d_[q1]], 1),
+                         np.stack([a_[q2], b_[q2], c_[q2]], 1), np.stack([b_[q2], d_[q2], c_[q2]], 1)])
+    if float(np.cross(e1, e2) @ u) < 0:                         # the winding's normals up
+        Fn = Fn[:, ::-1]
+    rec["grid_triangles"] = int(len(Fn))
+    if len(Fn) > int(target):
+        m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(_range_warp(Vn, P, near_m=TOP_NEAR_M, power=TOP_RANGE_POWER)),
+                                      o3d.utility.Vector3iVector(Fn.astype(np.int32)))
+        m = m.simplify_quadric_decimation(target_number_of_triangles=int(target))
+        m.remove_degenerate_triangles()
+        m.remove_unreferenced_vertices()
+        Vn = _range_warp(np.asarray(m.vertices), P, back=True, near_m=TOP_NEAR_M, power=TOP_RANGE_POWER)
+        Fn = np.asarray(m.triangles).astype(np.int64)
+    rec.update(triangles=int(len(Fn)), near_m=TOP_NEAR_M, range_power=TOP_RANGE_POWER)
+    return Vn, np.asarray(Fn, np.int64), rec
+
+
 def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TARGET_TRIANGLES) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    """(V, F, record) of the scene's mesh within ``radius_m`` of the mast axis, without the rover model, simplified."""
+    """(V, F, record) of the scene's mesh within ``radius_m`` of the mast axis, without the rover model, simplified:
+    as one sheet (1.0.5, :func:`top_sheet`), or - ``TOP_SHEET`` off, or the sheet failed - its triangles simplified."""
     from .mesh import decimate_and_smooth, horizontal_distance, keep_triangles
     V, F = np.asarray(scene.mesh_V, float), np.asarray(scene.mesh_F, np.int64)
     keep = np.ones(len(F), bool)
@@ -158,6 +251,32 @@ def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TAR
     keep &= near[F].all(axis=1)
     if not keep.any():
         raise ValueError(f"station mesh: no terrain within {radius_m:g} m of the mast axis")
+    if TOP_SHEET:
+        try:
+            tt = getattr(scene, "terrain_triangles", None)
+            fill = None
+            if tt is not None:
+                fill = np.ones(len(F), bool)
+                fill[tt[0]:tt[1]] = False
+            wide = horizontal_distance(V, pivot, up) <= float(radius_m) + 0.5      # the sheet's rim has ground under it
+            kw = wide[F].any(axis=1)
+            if rt is not None:
+                kw[rt[0]:rt[1]] = False
+            key = (float(radius_m), int(target), TOP_STEP_M, TOP_RANGE_POWER, tuple(np.round(np.asarray(pivot, float), 6)))
+            cache = getattr(scene, "_top_sheet", None)
+            if cache is not None and cache[0] == key:           # the terrain and the scape parts ask for the same sheet
+                Vt, Ft, top = cache[1]
+            else:
+                Vt, Ft, top = top_sheet(V, F[kw], pivot, up, radius_m, target, fill=None if fill is None else fill[kw])
+                try:
+                    scene._top_sheet = (key, (Vt, Ft, top))
+                except Exception:                               # noqa: BLE001 - a scene that takes no attribute
+                    pass
+            if len(Ft):
+                return Vt, Ft, {"triangles_within_radius": int(keep.sum()), "triangles": int(len(Ft)),
+                                "radius_m": float(radius_m), "top_sheet": top}
+        except Exception as e:                                  # noqa: BLE001 - the mesh's own triangles, as before 1.0.5
+            log.warning("station mesh: the one-sheet terrain failed (%s) - the mesh's triangles are simplified instead", e)
     V2, F2 = keep_triangles(V, F, keep)
     n0 = len(F2)
     V2, F2, rep = decimate_and_smooth(V2, F2, target_triangles=int(target), taubin_iterations=0)
@@ -674,6 +793,83 @@ def fill_cells(rgb: np.ndarray, have: np.ndarray, cells: Dict[str, Any], default
     return n
 
 
+GROW_COLORS = True              # 1.0.5: a cell's texels no frame colored take colors grown in from the patch's seen edges
+
+
+def _bilinear(rgb: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """``rgb`` (H, W, 3) at the texel coordinates (x, y) of texel centers (x + 0.5 is a center), bilinear."""
+    H, W = rgb.shape[:2]
+    x = np.clip(np.asarray(x, float) - 0.5, 0, W - 1.001)
+    y = np.clip(np.asarray(y, float) - 0.5, 0, H - 1.001)
+    x0, y0 = x.astype(np.int64), y.astype(np.int64)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+    return ((1 - fy) * ((1 - fx) * rgb[y0, x0] + fx * rgb[y0, x0 + 1])
+            + fy * ((1 - fx) * rgb[y0 + 1, x0] + fx * rgb[y0 + 1, x0 + 1]))
+
+
+def grown_vertex_colors(F: np.ndarray, vis: np.ndarray, color: np.ndarray, default: Sequence[float]) -> np.ndarray:
+    """Colors (n, 3) for all the vertices: ``color`` at the vertices of the visible triangles (``vis``), and over the
+    hidden triangles' other vertices the harmonic interpolation of those - every free vertex the mean of its
+    neighbors along the hidden triangles' edges.  A patch that touches no visible triangle takes ``default``."""
+    from scipy.sparse import coo_matrix, identity
+    from scipy.sparse.linalg import spsolve
+    n = len(color)
+    out = np.asarray(color, np.float64).copy()
+    fixed = np.zeros(n, bool)
+    fixed[np.unique(F[vis])] = True
+    Fh = F[~vis]
+    free = np.unique(Fh)
+    free = free[~fixed[free]]
+    if not len(free):
+        return out
+    idx = np.full(n, -1, np.int64)
+    idx[free] = np.arange(len(free))
+    E = np.concatenate([Fh[:, [0, 1]], Fh[:, [1, 2]], Fh[:, [2, 0]]])
+    E = np.unique(np.concatenate([E, E[:, ::-1]]), axis=0)
+    E = E[idx[E[:, 0]] >= 0]
+    to_free = idx[E[:, 1]] >= 0
+    m = len(free)
+    eps = 1e-4                                                  # a weak pull to the default: an island has a solution
+    deg = np.bincount(idx[E[:, 0]], minlength=m).astype(np.float64)
+    A = (coo_matrix((np.r_[deg, -np.ones(int(to_free.sum()))],
+                     (np.r_[np.arange(m), idx[E[to_free, 0]]], np.r_[np.arange(m), idx[E[to_free, 1]]])), shape=(m, m)).tocsc()
+         + eps * identity(m, format="csc"))
+    b = eps * np.tile(np.asarray(default, np.float64), (m, 1))
+    np.add.at(b, idx[E[~to_free, 0]], out[E[~to_free, 1]])
+    out[free] = np.stack([spsolve(A, b[:, k]) for k in range(3)], axis=1)
+    return out
+
+
+def grow_cells(rgb: np.ndarray, have: np.ndarray, cells: Dict[str, Any], corner_colors: np.ndarray) -> int:
+    """1.0.5 (Christian, 21 Nov 2026, Van Zyl: flat, jagged shards on the ground behind rocks): a cell's texels no
+    frame colored take the color interpolated between its triangle's corners (``corner_colors`` (m, 3, 3), from
+    :func:`grown_vertex_colors`), not one flat color per cell - neighboring hidden triangles then agree along their
+    shared edges and with the seen surface around the patch.  Returns the texels colored."""
+    n = 0
+    size = rgb.shape[0]
+    for k, ((x, y), (w, h)) in enumerate(zip(cells["pos"], cells["wh"])):
+        sl = (slice(int(y), int(y + h)), slice(int(x), int(x + w)))
+        hv = have[sl]
+        if hv.all():
+            continue
+        p = cells["uv"][k] * size                               # the corners in texels
+        d = (p[1, 1] - p[2, 1]) * (p[0, 0] - p[2, 0]) + (p[2, 0] - p[1, 0]) * (p[0, 1] - p[2, 1])
+        yy, xx = np.nonzero(~hv)
+        if abs(d) < 1e-9:
+            col = corner_colors[k].mean(axis=0)[None]
+        else:
+            px, py = xx + int(x) + 0.5, yy + int(y) + 0.5
+            w0 = ((p[1, 1] - p[2, 1]) * (px - p[2, 0]) + (p[2, 0] - p[1, 0]) * (py - p[2, 1])) / d
+            w1 = ((p[2, 1] - p[0, 1]) * (px - p[2, 0]) + (p[0, 0] - p[2, 0]) * (py - p[2, 1])) / d
+            wgt = np.clip(np.stack([w0, w1, 1.0 - w0 - w1], 1), 0.0, 1.0)      # the gutter: the nearest of the triangle
+            wgt /= np.maximum(wgt.sum(1), 1e-9)[:, None]
+            col = wgt @ corner_colors[k]
+        blk = rgb[sl]
+        blk[yy, xx] = col.astype(rgb.dtype)
+        n += len(yy)
+    return n
+
+
 # ------------------------------------------------------------------------------------------- charts (1.0)
 def _adjacency(F: np.ndarray, V: np.ndarray, weld_m: float = WELD_M) -> List[List[int]]:
     """For each triangle, the triangles that share an edge with it (vertices within ``weld_m`` are one)."""
@@ -1078,6 +1274,8 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     for j in range(pts.shape[1]):
         under &= under_a_sheet(rc, pts[:, j], up)
     under &= ~seen
+    if rec.get("top_sheet"):                                    # 1.0.5: one sheet has nothing beneath it - what is
+        under[:] = False                                        # hidden there is a rock's far side, not a crack
     vis = (seen & ~grazing) | (under & ~grazing) | (horizontal_distance(pts[:, 0], P, up) > CELL_RADIUS_M)
     used = np.unique(F[vis])
     th = np.arccos(np.clip(((V[used] - C) / np.linalg.norm(V[used] - C, axis=1)[:, None]) @ -up, -1, 1))
@@ -1093,10 +1291,25 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
         nrm = -nrm                                              # start above the surface)
     uv_v = disc_uv(V, C, size, rpx, theta_max, up, north, east, knee=knee)
     uv_v, vis, warp = warp_small_patches(V, F, uv_v, vis, area)  # 0.99.51: small hidden patches keep the disc
-    hid = np.flatnonzero(~vis)
-    nh = nrm[hid].copy()
-    lay = triangle_layout(V, F[hid], nh)
-    cells = layout_cells(lay, area[hid], size, disc=disc)
+    # 1.0.5: the cells have to fit beside the disc.  A site of many rocks has more hidden triangles than the corners
+    # hold (each cell has its gutter): then only those nearer the mast get cells, the others the disc's picture
+    rh = horizontal_distance(pts[:, 0], P, up)
+    cell_radius = CELL_RADIUS_M
+    for cell_radius in (CELL_RADIUS_M, 7.5, 5.0, 3.5, 2.5, 0.0):
+        v2 = vis | (rh > cell_radius)
+        hid = np.flatnonzero(~v2)
+        nh = nrm[hid].copy()
+        lay = triangle_layout(V, F[hid], nh)
+        try:
+            cells = layout_cells(lay, area[hid], size, disc=disc)
+        except RuntimeError:
+            if cell_radius == 0.0:
+                raise
+            continue
+        vis = v2
+        break
+    if cell_radius < CELL_RADIUS_M:
+        log.info("station mesh: the hidden triangles' cells fit only within %.1f m of the mast axis (%d cells)", cell_radius, len(hid))
     args = {"size": size, "linear": linear, "up": tuple(up), "offset_m": TERRAIN_OFFSET_M,
             "disc": {"C": tuple(C), "rpx": rpx, "theta_max": theta_max, "up": tuple(up), "north": tuple(north), "east": tuple(east),
                      "knee": knee},
@@ -1124,7 +1337,14 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
         sky_white = sky_texels(rgb, sky & in_disc, have, in_disc, size, rpx, knee)
     sky = None
     med = np.median(rgb[seen_disc][::97], axis=0) if seen_disc.any() else np.full(3, 128.0)
-    cell_filled = fill_cells(rgb, have, cells, med)
+    cell_grown = 0
+    if GROW_COLORS and len(hid):
+        try:                                                    # 1.0.5: colors grown in from the patch's seen edges
+            vcol = grown_vertex_colors(F, vis, _bilinear(rgb, uv_v[:, 0] * size, uv_v[:, 1] * size), med)
+            cell_grown = grow_cells(rgb, have, cells, vcol[F[hid]])
+        except Exception as e:                                  # noqa: BLE001 - the flat fill below
+            log.warning("station mesh: growing the hidden cells' colors failed (%s) - they take one color each", e)
+    cell_filled = cell_grown or fill_cells(rgb, have, cells, med)
     used = in_disc.copy()                                        # 0.99.51: a band about the disc and the cells takes
     for (x, y), (w, h) in zip(cells["pos"], cells["wh"]):        # their colors; beyond it, the fifth mode's white
         used[int(y):int(y + h), int(x):int(x + w)] = True
@@ -1150,10 +1370,11 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     rec.update(texture_px=size, center_above_pivot_m=float(center_above_m), theta_max_deg=round(float(np.degrees(theta_max)), 2),
                triangles_from_center=int(vis.sum()), triangles_in_cells=int(len(hid)),
                hidden_from_center=int((~seen).sum()), edge_on_from_center=int((seen & grazing).sum()),
-               under_a_sheet=int(under.sum()),
+               under_a_sheet=int(under.sum()), cell_radius_m=float(cell_radius),
                cell_texel_mm=None if cells["texel_m"] is None else round(1000 * cells["texel_m"], 2),
                disc_texels_colored=round(float(seen_disc.sum() / max(n_disc_texels, 1)), 4),
                disc_texels_filled=int(filled.sum()), cell_texels_filled=int(cell_filled),
+               cell_fill="grown in from the patch's seen edges" if cell_grown else "one color per cell",
                border_texels_filled=int(border_filled), warped=warp,
                mrad_per_texel=round(1000 * (knee[0] / (knee[1] * rpx) if knee else theta_max / rpx), 4))
     out_shell = None
@@ -1274,6 +1495,29 @@ def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX,
     return {"V": Vo, "F": Fo, "uv": UVo, "texture": rgb, "record": rec}
 
 
+def model_code() -> str:
+    """1.0.5: a hash of this module - the code that makes the full 3D model's parts.  Every part's record carries it
+    ("model_code"); the station runs (:mod:`rpp.ibr.single_sites`) make a station's model again when it differs, and
+    leave the station's mesh and panoramas, which this module does not make, as they are."""
+    import hashlib
+    return hashlib.sha1(Path(__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest()[:16]
+
+
+def model_current(folder: PathLike, kinds: Sequence[str]) -> bool:
+    """True when ``folder`` holds a part of each of ``kinds`` (keys of :data:`PART`) made by this code."""
+    now = model_code()
+    for kind in kinds:
+        ok = False
+        for f in Path(folder).glob(f"*{PART[kind]}.json"):
+            try:
+                ok = ok or json.loads(f.read_text(encoding="utf-8")).get("model_code") == now
+            except (OSError, ValueError):
+                pass
+        if not ok:
+            return False
+    return True
+
+
 def write_part(out_dir: PathLike, prefix: str, kind: str, part: Dict[str, Any], station, to8, to16=None) -> Dict[str, Any]:
     """``<prefix>_<PART[kind]>.npz`` (V in the viewer's frame, F, uv), ``.jpg`` (the texture, 8-bit by ``to8``), ``.json``.
 
@@ -1308,7 +1552,8 @@ def write_part(out_dir: PathLike, prefix: str, kind: str, part: Dict[str, Any], 
         extra = {"shell_V": page_frame(sh["V"], station.pivot, station.east, station.up, station.north),
                  "shell_F": np.asarray(sh["F"], np.uint32), "shell_uv": np.asarray(sh["uv"], np.float32)}
     np.savez_compressed(out / (stem + ".npz"), V=Vp, F=np.asarray(part["F"], np.uint32), uv=np.asarray(part["uv"], np.float32), **extra)
-    rec = dict(part["record"], kind=kind, files=[stem + ".npz", stem + ".jpg"] + files16, vertices=int(len(Vp)), mesh_triangles=int(len(part["F"])))
+    rec = dict(part["record"], kind=kind, files=[stem + ".npz", stem + ".jpg"] + files16, vertices=int(len(Vp)), mesh_triangles=int(len(part["F"])),
+               model_code=model_code())
     (out / (stem + ".json")).write_text(json.dumps(rec, indent=1), encoding="utf-8")
     return rec
 

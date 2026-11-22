@@ -9,6 +9,40 @@ The development history before 1.0 is in
 [`docs/history/`](https://github.com/ctate7163/rpp/tree/main/docs/history): `CHANGELOG_v0p95-v0p99.md`,
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
+## 1.0.5 — 22 Nov 2026 (branch v1p01)
+The full 3D model only; meshes, depth maps and panoramas are those of 1.0.4.
+
+- **The viewer's terrain is one sheet** (`rpp.ibr.station_mesh.top_sheet`).  It was the station mesh's triangles
+  simplified (2.5 million to 500,000), and that mesh is several surfaces that are not sewn - the height field near
+  the rover, the Poisson patches on its steep faces, the zones beyond, the fill and its underlay.  Their rims, cracks
+  and overlaps came out of the simplification as arcs, flaps and holes one could see through (Van Zyl, the rocks at
+  3.9 m: 1.0.4 bridged some cracks in `mesh.ply`, the viewer model still showed them).  Now the mesh's top surface is
+  sampled straight down on a 2.5 cm grid - one height per place, a narrow pit (a crack fallen through to the sheet
+  beneath) raised to its rim - and that sheet is simplified to the same 500,000 triangles, in a space scaled by the
+  range so that the triangles are smaller near the rover.  Measured against the top surface of `mesh.ply`:
+  Van Zyl, 95 % of places within 1.3 mm at 1-4 m and 2.7 mm at 14-20 m (1.0.4: 6.4 and 30 mm); Rockytop Sol0461, median
+  0.2 - 0.3 mm (1.0.4: 3.5 mm near, 19 mm far).  Triangle edges at Van Zyl: 5.6 cm at 2-4 m, 11 cm beyond 10 m (9 - 10 cm
+  everywhere before).  What one sheet gives up is the underside of an overhang.  `TOP_SHEET = False` is the terrain of
+  before; a failure of the sheet falls back to it with a warning.
+- **Hidden ground takes colors grown in from its seen edges** (`grown_vertex_colors`, `grow_cells`).  A triangle the
+  mast does not see has a cell of its own; a cell's texels no frame colored took one flat color per cell - the flat,
+  jagged shards behind rocks.  They now take the color interpolated between the triangle's corners, the corners'
+  colors being the harmonic interpolation of the seen surface around the patch; the texels a frame colored stay.
+- The rule of 1.0.2 that gave a hidden triangle under another sheet the mast's picture is off for the one sheet (it
+  has nothing beneath it): at Rockytop 68,469 triangles took it, behind rocks the rock's lit face.
+- When the hidden triangles' cells do not fit beside the disc (a site of many rocks), only those nearer the mast get
+  cells (10, 7.5, 5, 3.5, 2.5 m), the others the disc's picture; it was an error that left the station without a model.
+- **A station's model is made again alone when only the model's code changed.**  Every part's record carries
+  `model_code` (a hash of `station_mesh.py`); `single-sites` runs `rpp ods ... --station-mesh-only` for a variant
+  whose panorama is up to date and whose model is of other code (the step "model" in the status and the summary), and
+  such a station is not "done".  `station_mesh.py` is out of the hash of the mesh / panorama code, and
+  `SAME_PRODUCTS` names this code as making the same meshes, maps and panoramas as 1.0.4's (`9360937dcbf555b7`): the
+  stations made on 1.0.4 get their models again (about a quarter of an hour each), not their panoramas (an hour).
+  The model made alone reads the panorama's sky from the 16-bit file of the run before and writes the texture's
+  color skins.
+- Not in this version: the mesh's own cracks (`mesh.ply` is as 1.0.4 makes it; the panoramas, rendered from the mast,
+  do not show them), and the white disc at the base of the rock at Van Zyl (in the panorama itself; origin not found).
+
 ## 1.0.4 — 21 Nov 2026 (branch v1p01)
 - Station mesh, one sheet (`rpp.ibr.mesh.tidy_sheets`, after the fill; `mesh_report.json` `fill.tidy`): within 10 m
   the long triangles seen edge-on from the pivot are dropped; a level measured triangle wholly under another piece of
