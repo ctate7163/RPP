@@ -10,10 +10,28 @@ The development history before 1.0 is in
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
 ## 1.0.1.dev0 — in development (branch v1p01)
-- Brightness: `color.brightness_gain` 1.1 on every camera (with the family factors).  The level had been set on
-  blocks imaged near perihelion; the Sun-distance term darkens those by 0.82, so the gain puts them at 0.90 of their
-  1.0 level and the aphelion blocks at 1.31.  A configuration saved before has no gain and gets it; the station
-  frames' cache key includes it.
+- Brightness: the scale of every camera x 1.1 (`color.scale_rad_to_int16` 2e5 -> 2.2e5; for some hours of 21 Nov a
+  key of its own, `color.brightness_gain`).  The level had been set on blocks imaged near perihelion; the
+  Sun-distance term darkens those by 0.82, so the new scale puts them at 0.90 of their old level and the aphelion
+  blocks at 1.31.  A block processed before 1.0.1 keeps its saved scale for its own images; its station frames get
+  the factor with the distance term (`rpp.ibr.linear16.block_config`), the level of a block processed today.
+- Mastcam-Z ZCAM08323 (sol 298, Issole; a focus sweep looking down 25 to 60 degrees) is in the low focus state
+  (`298:ZCAM08323` in the shipped list): in the 21 Nov Z34 joint its left eye measured 4669.0 / 4677.5 / 4689.6 px
+  at focus 138 / 516 / 786, on the low line (4678.8 / 4688.4 / 4695.2) and 1 % under the high line; run as high it
+  failed the joint's sequence-offset check (-11,876 / -12,433 ppm) and Z34 was not promoted.
+- Stale products: a dense workspace records the block model and the image and mask sets it was made from
+  (`rpp.sfm.dense.workspace_source`) and is rebuilt when the block was aligned or processed again (a changed mask
+  set keeps the depth maps); a station's steps are keyed to the block (`single_sites.block_stamp`: the model and the
+  radiometric key) and the station code key covers `image.py`, `radiometry.py`, `sun.py` and the tau table.
+- Docs: a page on the Mars coordinate systems (`docs/coordinates.md`: the IAU 2000 sphere, planetocentric latitude,
+  east longitude, the site, rover navigation, world, camera and station frames, the pixel origin, what each file
+  carries, how Metashape reads the PNG position).
+- Station runs leave a block alone while a run of it is going on (`single_sites.block_busy`, the block's
+  `mppp_status.json`): a block being processed or aligned again keeps the `run_done.json` of the run before, and a
+  station made then would mix old and new images.  `--wait-for-blocks` comes back to it.
+- Metadata: every 16-bit station frame and every station product carries its provenance - XMP fields (station,
+  areocentric latitude, east longitude, elevation, frame, block and block model, radiometric key, scales) and, for the
+  frames, the EXIF GPS position Metashape reads.
 - The version is 1.0.1 (branch `v1p01`; called 1.1 for a day).  "1.01" is not a version of its own for Python
   packaging - it is read as 1.1.
 - Station products follow the radiometric settings: a cached 16-bit frame (`images16/`) made under other settings - or

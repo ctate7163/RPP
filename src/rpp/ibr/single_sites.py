@@ -422,6 +422,15 @@ def block_aligned(work: PathLike) -> bool:
     return (Path(work) / "colmap" / "run_done.json").is_file()
 
 
+def block_busy(work: PathLike) -> Optional[int]:
+    """1.0.1: the pid of a run of the block that is going on (its ``mppp_status.json`` alive), else None.  A block
+    being processed or aligned again keeps the ``run_done.json`` of the run before while its images, masks and model
+    are rewritten; a station made from it then would mix the two."""
+    from ..runner import STATUS_FILE as RUN_STATUS, read_status
+    cur = read_status(Path(work) / RUN_STATUS)
+    return int(cur.get("pid") or 0) if cur and cur.get("alive") else None
+
+
 def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = None, labels: Optional[Sequence[str]] = None,
          steps: Sequence[str] = STEPS, variants: Optional[Sequence[str]] = None, ods_width: Optional[int] = None,
          rover_surface: bool = False, station_mesh: Union[bool, str] = False,
@@ -555,17 +564,42 @@ def code_key() -> str:
     import hashlib
     h = hashlib.sha1()
     here = Path(__file__).resolve().parent
-    for f in sorted(here.glob("*.py")) + [here.parent / "sfm" / "dense.py"]:
+    # 1.0.1: and what turns a product into a frame's values - the image, radiometry and Sun modules and the opacity
+    # table (a change there used to leave every panorama as it was)
+    more = [here.parent / n for n in ("image.py", "radiometry.py", "sun.py")] + sorted((here.parent / "data").glob("*taus*.csv"))
+    for f in sorted(here.glob("*.py")) + [here.parent / "sfm" / "dense.py"] + more:
         if f.is_file() and f.name not in NOT_IN_CODE_KEY:
             h.update(f.name.encode() + f.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:16]
 
 
-def step_key(argv: Sequence[str], before: str, code: str, inputs: Sequence[PathLike] = ()) -> str:
-    """The identity of one step's run: its command, the code, the step before it (``before``: that step's key) and
-    the size and time of the files it reads (the fused cloud for the mesh)."""
+def block_stamp(work: PathLike) -> str:
+    """1.0.1: what a station's products take from its block beside the cloud - the aligned model
+    (:func:`rpp.sfm.dense.model_stamp`) and the radiometric settings (:func:`rpp.ibr.linear16.radiometry_key`).  In
+    every step's key (:func:`step_key`): a block aligned again, or other brightness settings, make the station's
+    mesh, maps and panoramas again."""
+    from types import SimpleNamespace
+    from ..sfm.dense import model_stamp
+    from .linear16 import block_config, radiometry_key
+    root = Path(work) / "colmap"
+    model = None
+    for d in (root / "gui_native" / "sparse", root / "sparse" / "cahv_ba"):
+        model = model_stamp(d)
+        if model:
+            break
+    try:
+        rad = radiometry_key(block_config(SimpleNamespace(root=root, settings={})))
+    except Exception:                                            # noqa: BLE001 - a block without its settings file
+        rad = None
+    return f"model:{model}|radiometry:{rad}"
+
+
+def step_key(argv: Sequence[str], before: str, code: str, inputs: Sequence[PathLike] = (), block: str = "") -> str:
+    """The identity of one step's run: its command, the code, the step before it (``before``: that step's key), the
+    size and time of the files it reads (the fused cloud for the mesh) and, since 1.0.1, the block's model and
+    radiometric settings (``block``: :func:`block_stamp`)."""
     import hashlib
-    parts = [code, before, *map(str, argv)]
+    parts = [code, before, *map(str, argv)] + ([block] if block else [])
     for f in inputs:
         f = Path(f)
         parts.append(f"{f.name}:{f.stat().st_size}:{int(f.stat().st_mtime)}" if f.is_file() else f"{f.name}:-")
@@ -603,6 +637,11 @@ def station_done(run: Dict[str, Any]) -> bool:
             return False
         if rec.get("code") != _CODE_NOW():                 # 0.99.51 (Christian, 20 Nov 2026: "every site gets remade
             return False                                   # from the fusion up if it wasn't generated on the same code")
+        try:                                               # 1.0.1: nor on another alignment or other brightness
+            if rec.get("block") != block_stamp(run["work"]):
+                return False
+        except Exception:                                  # noqa: BLE001 - then the steps' own keys decide
+            return False
     return True
 
 
@@ -922,7 +961,9 @@ def run_all(runs: List[Dict[str, Any]], out_root: PathLike, squares_only: bool =
                         before = keys.get(v, "") + (json.dumps(_read(step_record(tf, "mesh")).get("key")) if tf else "")
                         if step == "ods":                  # the second variant uses the first one's levels
                             before += "".join(ods_keys)
-                        key = step_key(c["argv"], before, code, clouds)
+                        if "stamp" not in run:                # 1.0.1: the block's model and radiometry
+                            run["stamp"] = block_stamp(work_)
+                        key = step_key(c["argv"], before, code, clouds, block=run["stamp"])
                         keys[v] = key
                         if step == "ods":
                             ods_keys.append(key)
@@ -939,7 +980,7 @@ def run_all(runs: List[Dict[str, Any]], out_root: PathLike, squares_only: bool =
                         if rc == 0:
                             vout.mkdir(parents=True, exist_ok=True)
                             step_record(vout, step).write_text(json.dumps(
-                                {"key": key, "exit": 0, "argv": c["argv"], "code": code, "rpp": _rpp_version(),
+                                {"key": key, "exit": 0, "argv": c["argv"], "code": code, "block": run.get("stamp"), "rpp": _rpp_version(),
                                  "minutes": round((time.time() - t0) / 60, 2),
                                  "finished": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1), encoding="utf-8")
                     mins.setdefault(v, {})[step] = (time.time() - t0) / 60
@@ -1193,6 +1234,10 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
         print(f"single-sites --recolor: {len(runs)} station(s) with their 16-bit panoramas"
               + (f", {len(gone)} without (not made yet, or before 0.99.38)" if gone else ""))
         a.any_block = True
+    under_run = [r for r in runs if block_busy(r["work"])]      # 1.0.1: a block under a run is left alone (also with
+    for r in under_run:                                         # --any-block); --wait-for-blocks comes back to it
+        print(f"single-sites: {r['label']} skipped - a run of its block {r['work']} is going on")
+    runs = [r for r in runs if r not in under_run]
     if not getattr(a, "any_block", False):                      # 0.99.28 (Christian, 18 Nov 2026: "The next ods should use
         late = [r for r in runs if not block_aligned(r["work"])]   # the post freeze blocks. Skip an ods site if the block
         for r in late:                                          # has not aligned yet")
@@ -1201,6 +1246,8 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
         if late:
             print(f"single-sites: {len(runs)} station(s) to run, {len(late)} skipped for blocks not aligned yet")
         a._late = [r["label"] for r in late] + [f"{k} (Z34?)" for k in (cfg.get("_zcam_pending") or {}) if pairs is not None]
+    if under_run:
+        a._late = list(getattr(a, "_late", [])) + [r["label"] for r in under_run]
     if getattr(a, "skip_done", False) and not getattr(a, "force", False) and not (a.squares_only or a.retone or a.publish_only):
         done_ = [r for r in runs if station_done(r)]             # 0.99.47 (Christian, 19 Nov 2026: "recolor_rpv.bat should
         for r in done_:                                          # skip sites already processed")

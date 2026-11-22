@@ -47,3 +47,36 @@ def test_stored_levels_of_other_radiometry_are_dropped(tmp_path):
     assert (v, src) == (1.5, "computed")
     assert L.reset_stale_levels(f, "abc") is False and json.loads(f.read_text())["exposure16"] == 1.5   # the same key: kept
     assert L.reset_stale_levels(None, "abc") is False and L.reset_stale_levels(f, None) is False
+
+
+def test_frames_carry_their_provenance_scales_and_position(tmp_path):
+    """1.0.1: a 16-bit frame's PNG holds an XMP packet (source product, scales, radiometric key) and, where the
+    block's manifest has the frame, the Mars position as EXIF GPS."""
+    import cv2
+    from rpp.ibr.xmp import read_fields
+    from rpp.writers import read_png_chunks
+    name = "NLF_0461_0707874229_177RAD_N0260630NCAM02461_0A0195J02.png"
+    pds = tmp_path / "pds"
+    pds.mkdir()
+    (pds / name.replace(".png", ".IMG")).write_bytes(b"x")
+    proj = _project(tmp_path)
+    rec = {"source_product": name.replace(".png", ".IMG"), "camera_group": "NLF", "mppp_version": "1.0.1", "sol": 461,
+           "site": 26, "drive": 630, "L_s_deg": 242.0, "solar_elevation_deg": 30.0, "tau_estimated": 0.98,
+           "geo": {"lat_deg": 18.4586, "lon_east_deg": 77.4059, "elev_geoid_m": -2523.2}, "outputs": {"PNG8": "images_png8/" + name}}
+    (tmp_path / "processed" / "mppp_manifest_v1p0.json").write_text(json.dumps({"images": [rec]}))
+
+    def make(prod, cfg):
+        return np.full((4, 6, 3), 1000, np.uint16), np.zeros((4, 6), bool), {
+            "product": prod.name, "white_balance": [1.0, 1.224, 1.569], "brightness": 1.176, "scale_zenith": 0.61,
+            "scale_sun_distance": 1.214, "scale_rad_to_int16": 2e5, "to_radiance_divide_by": [1.0, 2.0, 3.0],
+            "saturated_share": 0.0, "clipped_in_8bit_share": 0.0, "clipped_in_16bit_share": 0.0}
+    r = L.ensure_linear16(proj, [name], pds=pds, make=make)
+    f = proj.root / "images16" / name
+    assert r["made"] == 1 and cv2.imread(str(f), cv2.IMREAD_UNCHANGED).shape == (4, 6, 3)      # still a readable picture
+    x = read_fields(f)
+    assert x["SourceProduct"].endswith(".IMG") and x["RadiometryKey"] == r["radiometry_key"]
+    assert float(x["SunDistanceScale"]) == 1.214 and float(x["ZenithScale"]) == 0.61 and x["Sol"] == "461"
+    assert float(x["LatitudePlanetocentricDeg"]) == 18.4586 and float(x["LongitudeEastDeg"]) == 77.4059
+    assert read_png_chunks(f).get("eXIf")                                # the Mars position as EXIF GPS
+    pos = L.station_position(L.block_manifest(proj), [name])
+    assert pos["LatitudePlanetocentricDeg"] == 18.4586 and pos["ElevationAreoidM"] == -2523.2 and "IAU 2000" in pos["Datum"]

@@ -9,7 +9,7 @@ white there although the camera measured them.  For the panorama the frames are 
 with the block's own processing settings (``processed/mppp_config_v*.json``), mask inference off, and kept as
 
     <project>/images16/<image>.png         uint16 RGB, linear:  radiance x white balance x brightness
-                                           / zenith scale x ``scale_rad_to_int16`` (2e5); 0 = no data
+                                           / zenith scale x ``scale_rad_to_int16`` (2.2e5); 0 = no data
     <project>/images16/<image>.sat.png     255 where the detector was saturated (a plateau at the top of a channel)
     <project>/images16/linear16.json       per frame: the factors above, the share saturated, the share the 8-bit
                                            image clips
@@ -100,6 +100,9 @@ def linear16_of_product(path: PathLike, config: Dict[str, Any]) -> Tuple[np.ndar
     return i16, sat, facts
 
 
+SCALE_GAIN_1P01 = 1.1      # 1.0.1: color.scale_rad_to_int16 2e5 -> 2.2e5, with the Sun-distance term
+
+
 def block_config(project) -> Dict[str, Any]:
     """The processing settings the block's images were made with (``processed/mppp_config_v*.json``, the newest)."""
     from ..config import load_config
@@ -126,6 +129,12 @@ def block_config(project) -> Dict[str, Any]:
                 bf = (user.get("color") or {}).get("brightness_by_family")
                 if isinstance(bf, dict):
                     cfg["color"]["brightness_by_family"] = dict(bf)
+                # 1.0.1: a block processed before the Sun-distance term (no radiometry.apply_sun_distance in its
+                # saved settings) holds the scale of that time, set on perihelion blocks.  Its station frames get
+                # the distance term from today's defaults, so they get the x 1.1 that came with it too - the same
+                # level as a block processed today (color.scale_rad_to_int16 2e5 -> 2.2e5)
+                if "apply_sun_distance" not in (user.get("radiometry") or {}):
+                    cfg["color"]["scale_rad_to_int16"] = float(cfg["color"]["scale_rad_to_int16"]) * SCALE_GAIN_1P01
                 return cfg
     raise FileNotFoundError(f"no processed/mppp_config_v*.json for {project.root}")
 
@@ -196,8 +205,7 @@ def radiometry_key(cfg: Dict[str, Any]) -> str:
     c = cfg.get("color") or {}
     part = {"radiometry": cfg.get("radiometry") or {},
             "color": {k: c.get(k) for k in ("enhance", "white_balance_ecam", "white_balance_hazcam", "white_balance_zcam",
-                                            "white_balance_vce", "brightness_by_family", "brightness_gain",
-                                            "scale_rad_to_int16")}}
+                                            "white_balance_vce", "brightness_by_family", "scale_rad_to_int16")}}
     return hashlib.sha1(json.dumps(part, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
@@ -219,6 +227,73 @@ def reset_stale_levels(path: Optional[PathLike], key: Optional[str]) -> bool:
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps({"radiometry_key": key}, indent=1), encoding="utf-8")
     return bool([k for k in d if k != "radiometry_key"])
+
+
+def block_manifest(project) -> Dict[str, Dict[str, Any]]:
+    """1.0.1: the block's per-image records by output name (``processed/mppp_manifest_v*.json``, the newest; {} when
+    there is none): the source product, the camera, the Mars position, the pose - what the metadata of a frame and of
+    a station's products are made from."""
+    for d in (Path((getattr(project, "settings", None) or {}).get("processed_dir", "")), Path(project.root).parent / "processed"):
+        if d.is_dir():
+            c = sorted(d.glob("mppp_manifest_v*.json"), key=lambda f: f.stat().st_mtime)
+            if c:
+                try:
+                    ims = json.loads(c[-1].read_text(encoding="utf-8")).get("images") or []
+                except (OSError, ValueError):
+                    return {}
+                out = {}
+                for m in ims if isinstance(ims, list) else ims.values():
+                    for k in ("PNG8", "PNG16", "TIFF16"):
+                        n = (m.get("outputs") or {}).get(k)
+                        if n:
+                            out[Path(n).name] = m
+                return out
+    return {}
+
+
+def station_position(manifest: Dict[str, Dict[str, Any]], names: Iterable[str]) -> Dict[str, Any]:
+    """1.0.1: the Mars position of a station from its frames' records (the median): planetocentric latitude,
+    east-positive longitude (deg, IAU 2000 sphere) and elevation above the areoid (m); {} when unknown."""
+    g = [(manifest.get(n) or {}).get("geo") or {} for n in names]
+    g = [x for x in g if x.get("lat_deg") is not None and x.get("lon_east_deg") is not None]
+    if not g:
+        return {}
+    el = [x["elev_geoid_m"] for x in g if x.get("elev_geoid_m") is not None]
+    return {"LatitudePlanetocentricDeg": round(float(np.median([x["lat_deg"] for x in g])), 7),
+            "LongitudeEastDeg": round(float(np.median([x["lon_east_deg"] for x in g])), 7),
+            "ElevationAreoidM": round(float(np.median(el)), 3) if el else None,
+            "Datum": "Mars IAU 2000 sphere, radius 3396190 m; planetocentric latitude, east-positive longitude"}
+
+
+def frame_metadata(path: PathLike, facts: Dict[str, Any], record: Optional[Dict[str, Any]], key: Optional[str]) -> None:
+    """1.0.1: the metadata of one 16-bit frame, written into its PNG without re-encoding - an XMP packet with the
+    provenance (the PDS product, the RPP version, the radiometric key) and every factor between the stored values and
+    radiance (white balance, brightness, zenith scale with its Sun-distance part, the scale to 16 bits, the divisor
+    back to radiance), and, where the block's manifest has the frame, an ``eXIf`` chunk with the camera tags and the
+    Mars position in EXIF-GPS form (:func:`rpp.writers.build_exif`), which Metashape reads on import."""
+    from .xmp import fields_xmp, inject_png
+    from ..writers import _chunk, build_exif, insert_png_chunks
+    fields = {"Product": "linear 16-bit RGB frame (radiance x white balance x brightness / zenith scale x scale)",
+              "SourceProduct": facts.get("product"), "RadiometryKey": key,
+              "WhiteBalanceRGB": json.dumps(facts.get("white_balance")), "Brightness": facts.get("brightness"),
+              "ZenithScale": facts.get("scale_zenith"), "SunDistanceScale": facts.get("scale_sun_distance"),
+              "ScaleRadianceTo16bit": facts.get("scale_rad_to_int16"),
+              "ToRadianceDivideBy": json.dumps(facts.get("to_radiance_divide_by")),
+              "ValuesPer8bitUnit": UNITS_PER_8BIT, "NoData": "0 in the three channels",
+              "Frame": "the block's world frame: east, north, up (m); poses in the block's COLMAP model"}
+    if record:
+        geo = record.get("geo") or {}
+        fields.update({"Sol": record.get("sol"), "Site": record.get("site"), "Drive": record.get("drive"),
+                       "LMST": record.get("LMST"), "SolarElevationDeg": record.get("solar_elevation_deg"),
+                       "SolarLongitudeDeg": record.get("L_s_deg"), "Tau": record.get("tau_estimated"),
+                       "LatitudePlanetocentricDeg": geo.get("lat_deg"), "LongitudeEastDeg": geo.get("lon_east_deg"),
+                       "ElevationAreoidM": geo.get("elev_geoid_m")})
+    path = Path(path)
+    inject_png(path, fields_xmp({k: v for k, v in fields.items() if v is not None}))
+    if record:
+        exif = build_exif(record)
+        if exif:
+            path.write_bytes(insert_png_chunks(path.read_bytes(), [_chunk(b"eXIf", exif)]))
 
 
 def files(project, name: str) -> Tuple[Path, Path]:
@@ -255,6 +330,7 @@ def ensure_linear16(project, names: Iterable[str], pds: Optional[PathLike] = Non
         missing = {n: cfg_error or "no block configuration" for n in todo}
         todo = []
     made = 0
+    manifest = None
     for n in todo:
         stem = Path(n).stem
         prod = find_product(stem, roots)
@@ -280,9 +356,16 @@ def ensure_linear16(project, names: Iterable[str], pds: Optional[PathLike] = Non
                 sat = cv2.resize(sat.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
                 facts["resized"] = True
         f, s = files(project, n)
+        if manifest is None:                                       # 1.0.1: the frames' records, read once
+            manifest = block_manifest(project)
         for dst, arr in ((f, np.ascontiguousarray(i16[..., ::-1])), (s, sat.astype(np.uint8) * 255)):
             tmp = dst.with_name(f"{dst.stem}.tmp{os.getpid()}{dst.suffix}")     # 1.0.1: whole files only - another
             cv2.imwrite(str(tmp), arr)                                           # station run may read this frame
+            if dst is f:
+                try:                                                 # 1.0.1: provenance, scales and the Mars position
+                    frame_metadata(tmp, facts, manifest.get(n), key)
+                except Exception as e:                               # noqa: BLE001 - the frame is whole without it
+                    log.warning("linear16: no metadata in %s (%s: %s)", n, type(e).__name__, e)
             os.replace(tmp, dst)
         facts["source"] = str(prod)
         facts["radiometry_key"] = key

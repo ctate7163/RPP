@@ -77,13 +77,14 @@ _DEFAULTS: Dict[str, Any] = {
         # F/R 1.104 x 1.079); to 0.99.21 it was {"N": 0.9} with the level in the balances
         "brightness_by_family": {"N": 1.069, "F": 1.191, "R": 1.191, "Z": 1.0},
         # 1.0.1 (Christian, 21 Nov 2026: "I set the brightness scale in order to not make rockytop and bright angel
-        # too bright. Now that [we] know about the x0.82 effect, we can increase the scale by about x1.1"): one gain
-        # on every camera, with the family factors.  The level was set on blocks imaged near perihelion, which the
-        # Sun-distance term (radiometry.apply_sun_distance) now darkens by 0.82; with the gain they end at 0.90 of
-        # their 1.0 level and the aphelion blocks (Belva, Seitah, Chal Rocks) at 1.31.  Its own key, not
-        # scale_rad_to_int16: a configuration saved before 1.0.1 holds that scale and no gain, so it gets this one.
-        "brightness_gain": 1.1,
-        "scale_rad_to_int16": 2e5,
+        # too bright. Now that [we] know about the x0.82 effect, we can increase the scale by about x1.1"; "color.
+        # brightness_gain should be the same as scale ... multiply scale for all the cameras by that gain"): the
+        # scale of every camera x 1.1, 2e5 -> 2.2e5 (the gain was its own key for some hours).  The level was set
+        # on blocks imaged near perihelion, which the Sun-distance term (radiometry.apply_sun_distance) now darkens
+        # by 0.82; with the new scale they end at 0.90 of their old level and the aphelion blocks (Belva, Seitah,
+        # Chal Rocks) at 1.31.  A block processed before 1.0.1 holds 2e5 in its saved configuration: its station
+        # frames get the factor from rpp.ibr.linear16.block_config (SCALE_GAIN_1P01).
+        "scale_rad_to_int16": 2.2e5,
         "scale_int8_to_int16": 64,
         "offset_int8_to_int16": 0.0,
         "apply_gamma": False,     # applies to the 8-bit product only

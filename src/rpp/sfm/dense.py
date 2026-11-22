@@ -26,7 +26,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union, List, Sequence
+from typing import Any, Dict, Iterable, Optional, Tuple, Union, List, Sequence
 
 import numpy as np
 
@@ -91,6 +91,73 @@ FUSED_LOOSE_PLY, FUSED_STRICT_PLY = "fused_loose.ply", "fused_strict.ply"
 # 10 Nov 2026 (Christian: "try this with and without the rover body and deck shown"): the fusion without the rover
 # masks goes to its own cloud, so the rover-removed products stay as they are
 FUSED_ROVER_PLY = "fused_rover.ply"
+
+
+MODEL_STAMP_FILE = "rpp_model_stamp.json"
+
+
+def model_stamp(model_dir: PathLike) -> Optional[str]:
+    """1.0.1: the identity of an aligned model - a hash of its COLMAP files (cameras, images, rigs, frames: every
+    pose and intrinsic).  Kept beside the model with the files' sizes and times, so a model is read once.  None
+    without a model.  A dense workspace, its depth maps and every station product made from them carry it: a block
+    aligned again is another model, and what was made from the old one is made again."""
+    import hashlib
+    d = Path(model_dir)
+    files = [d / n for n in ("cameras.bin", "images.bin", "rigs.bin", "frames.bin") if (d / n).is_file()]
+    if not files:
+        return None
+    sig = [[f.name, f.stat().st_size, int(f.stat().st_mtime_ns)] for f in files]
+    rec = d / MODEL_STAMP_FILE
+    try:
+        old = json.loads(rec.read_text(encoding="utf-8"))
+        if old.get("files") == sig and old.get("sha1"):
+            return str(old["sha1"])
+    except (OSError, ValueError):
+        pass
+    h = hashlib.sha1()
+    for f in files:
+        h.update(f.name.encode())
+        with open(f, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 22), b""):
+                h.update(chunk)
+    sha = h.hexdigest()[:16]
+    try:
+        rec.write_text(json.dumps({"files": sig, "sha1": sha}), encoding="utf-8")
+    except OSError:
+        pass
+    return sha
+
+
+def files_stamp(files: Iterable[PathLike]) -> Optional[str]:
+    """1.0.1: the identity of a set of files by name, size and time (the block's images or masks of a workspace)."""
+    import hashlib
+    h = hashlib.sha1()
+    n = 0
+    for f in sorted(map(str, files)):
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue
+        h.update(f"{Path(f).name}:{st.st_size}:{int(st.st_mtime)}\n".encode())
+        n += 1
+    return f"{n}:{h.hexdigest()[:12]}" if n else None
+
+
+def workspace_source(project: SfmProject, images: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """1.0.1: what a dense workspace of ``images`` (None: every image) is made from - the aligned model, the block's
+    images and its masks (:func:`model_stamp`, :func:`files_stamp`)."""
+    names = list(images) if images else [r["name"] for r in project.images]
+    from ..mask_levels import tight_mask_file
+    masks = []
+    if project.masks_dir.is_dir():
+        for n in names:
+            try:
+                masks.append(tight_mask_file(project.root, n, project.masks_dir))
+            except Exception:                                    # noqa: BLE001 - a frame without a mask
+                continue
+    return {"model": model_stamp(native_model_dir(project)),
+            "images": files_stamp(Path(project.images_dir) / n for n in names),
+            "masks": files_stamp(masks)}
 
 
 def native_model_dir(project: SfmProject) -> Path:
@@ -234,16 +301,40 @@ def prepare_dense(project: SfmProject, out_dir: Optional[PathLike] = None,
     import pycolmap
     out = Path(out_dir) if out_dir else Path(project.root) / DENSE_DIR
     rec_file = out / "mppp_dense.json"
+    source = workspace_source(project, images)                   # 1.0.1: the model, images and masks it is made from
     if (out / "sparse" / "cameras.bin").is_file() and rec_file.is_file() and not overwrite:
         prev = json.loads(rec_file.read_text(encoding="utf-8"))
-        if (int(prev.get("max_image_size", -1)) == int(max_image_size) and sorted(prev.get("subset") or []) == sorted(images or [])
-                and bool(prev.get("full_fov", False)) == bool(full_fov)):
+        same = (int(prev.get("max_image_size", -1)) == int(max_image_size) and sorted(prev.get("subset") or []) == sorted(images or [])
+                and bool(prev.get("full_fov", False)) == bool(full_fov))
+        was = prev.get("source")
+        if same and was is None:
+            # a workspace made before 1.0.1 has no record of its source.  It is kept and takes today's source as its
+            # own (making every depth map again would cost days of GPU for nothing where the block is unchanged) -
+            # with a warning when the block's model was written after it, which only an eye can settle
+            newer = [f.name for f in (native_model_dir(project) / n for n in ("cameras.bin", "images.bin"))
+                     if f.is_file() and f.stat().st_mtime > rec_file.stat().st_mtime + 60]
+            if newer:
+                log.warning("dense: workspace %s was made before the block's model files were last written (%s) - if "
+                            "the block was aligned again since, make it again (rpp dense --overwrite); kept", out, ", ".join(newer))
+            prev["source"] = source
+            rec_file.write_text(json.dumps(prev, indent=1), encoding="utf-8")
+            was = source
+        if same and was == source:
             log.info("dense: workspace %s is there (max_image_size %d%s); overwrite=True to redo it", out, max_image_size,
                      ", full field of view" if full_fov else "")
             return prev
-        for sub in ("images", "sparse", "masks"):                 # other undistortion: the old images go first
+        stale = [k for k in ("model", "images", "masks") if was is not None and was.get(k) != source.get(k)]
+        if stale:
+            log.warning("dense: workspace %s was made from another %s of the block - made again", out, " and ".join(stale))
+        drop = ["images", "sparse", "masks", SKY_MASK_DIR]        # other undistortion: the old images go first
+        if "model" in stale or "images" in stale:                 # other poses or pictures: the depth maps too (a
+            drop.append("stereo")                                 # workspace of other frames or size keeps its maps,
+                                                                  # as before: the stereo record decides)
+        for sub in drop:
             if (out / sub).exists():
                 shutil.rmtree(out / sub)
+        for f in list(out.glob("fused*.ply*")) + list(out.glob("rpp_fusion*.json")) + [out / "sky_masks.json"]:
+            f.unlink(missing_ok=True)                            # the cloud of the old maps or masks
     if out.exists() and overwrite:
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -279,7 +370,7 @@ def prepare_dense(project: SfmProject, out_dir: Optional[PathLike] = None,
     res: Dict[str, Any] = {"workspace": str(out), "source_model": str(model), "images": und.num_images(),
                            "cameras": und.num_cameras(), "max_image_size": int(max_image_size), "masks": None,
            "full_fov": bool(full_fov), "max_image_size_used": int(size_used),
-                           "seconds": None, "subset": sorted(images) if images else None}
+                           "seconds": None, "subset": sorted(images) if images else None, "source": source}
     if masks and project.masks_dir.is_dir():
         names = [r["name"] for r in project.images if r.get("has_mask") and (project.masks_dir / (r["name"] + ".png")).is_file()]
         in_model = {im.name for im in und.images.values()}

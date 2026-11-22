@@ -2772,6 +2772,7 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
         fr = [v for v in (lin_rep.get("frames") or {}).values() if v]
         rec_out["linear16"] = {
             "rendered": linear, "missing": lin_rep["missing"], "dir": lin_rep["dir"],
+            "radiometry_key": lin_rep.get("radiometry_key"),              # 1.0.1: the settings of the frames' values
             "left_out_without_16bit": lin_rep.get("left_out", []),        # 0.99.41: station frames left out
             "encoding": "uint16 linear, no gamma: value = radiance x white balance x brightness / zenith scale x "
                         "scale_rad_to_int16 x the frame's gain (gains in this file); value / 64 = the 8-bit panorama "
@@ -2807,9 +2808,30 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
         from .xmp import tag_folder
         from .xmp import author_fields, tag_products
         rec_out.update(author_fields())                                     # 0.99.53: the author and the RPP version
+        # 1.0.1 (Christian, 21 Nov 2026: "Every PNG saved should have metadata with the provenances and scaling factors
+        # plus whatever info is useful downstream"): the station, its Mars position, the frame, the block and its
+        # model, the radiometric key and the levels of the 8-bit views, in every picture of the folder
+        tags = {"Station": str(getattr(station, "label", "") or prefix)}
+        try:
+            from ..sfm.dense import model_stamp
+            from .linear16 import block_manifest, station_position
+            tags.update({k: v for k, v in station_position(block_manifest(project), list(station.images)).items() if v is not None})
+            tags.update({"Frame": "station frame: east, north, up (m) about the pivot on the mast axis; "
+                                  "column 0 of a panorama at AzimuthOfColumn0Deg east of north",
+                         "AzimuthOfColumn0Deg": rec_out.get("azimuth_of_column_0_deg"),
+                         "Block": Path(project.root).parent.name,
+                         "BlockModel": model_stamp(Path(project.root) / "gui_native" / "sparse"),
+                         "RadiometryKey": (rec_out.get("linear16") or {}).get("radiometry_key"),
+                         "Exposure16": (rec_out.get("linear16") or {}).get("exposure16"),
+                         "ViewLevels8bitUnits": json.dumps((rec_out.get("linear16") or {}).get("view_levels_8bit_units")),
+                         "SourceFrames": len(list(station.images)), "Record": "ods.json (every setting and source frame)"})
+            tags = {k: v for k, v in tags.items() if v is not None}
+            rec_out["position"] = {k: tags[k] for k in tags if k.startswith(("Latitude", "Longitude", "Elevation", "Datum"))}
+        except Exception as e:                                               # noqa: BLE001 - the station's name still goes in
+            log.warning("ods: the products' metadata without the position (%s: %s)", type(e).__name__, e)
         rec_out["xmp"] = tag_folder(out, heading_center_deg=float(rec_out.get("azimuth_of_column_0_deg") or 0.0) + 180.0,
-                                    extra={"Station": str(getattr(station, "label", "") or prefix)})
-        rec_out["xmp_author"] = len(tag_products(out, {"Station": str(getattr(station, "label", "") or prefix)}))
+                                    extra=tags)
+        rec_out["xmp_author"] = len(tag_products(out, tags))
     except Exception as e:                                                  # noqa: BLE001 - the products are complete without it
         log.warning("ods: XMP not written (%s: %s)", type(e).__name__, e)
     (out / "ods.json").write_text(json.dumps(rec_out, indent=1, default=float), encoding="utf-8")

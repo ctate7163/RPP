@@ -45,6 +45,7 @@ nav:
       - Command line: cli.md
       - API reference: api.md
       - Methods: methods.md
+      - Mars coordinate systems: coordinates.md
       - Windows batch files: WINDOWS.md
   - Project:
       - Roadmap: roadmap.md

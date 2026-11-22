@@ -100,3 +100,52 @@ def test_new_station_workspaces_search_a_bounded_depth_range():
     po = pycolmap.PatchMatchOptions()
     D.set_options(po, D.STATION_DEPTH_RANGE)                 # the fields exist on pycolmap's options
     assert po.depth_max == D.STATION_DEPTH_RANGE["depth_max"]
+
+
+def test_model_stamp_follows_the_model(tmp_path):
+    """1.0.1: the stamp of an aligned model changes with its poses and not with a rewrite of the same files."""
+    import os
+    from rpp.sfm.dense import MODEL_STAMP_FILE, files_stamp, model_stamp
+    assert model_stamp(tmp_path) is None
+    (tmp_path / "cameras.bin").write_bytes(b"c" * 100)
+    (tmp_path / "images.bin").write_bytes(b"i" * 1000)
+    a = model_stamp(tmp_path)
+    assert a and (tmp_path / MODEL_STAMP_FILE).is_file() and model_stamp(tmp_path) == a
+    (tmp_path / "images.bin").write_bytes(b"i" * 1000)           # written again with the same content
+    os.utime(tmp_path / "images.bin", (2e9, 2e9))
+    assert model_stamp(tmp_path) == a
+    (tmp_path / "images.bin").write_bytes(b"j" * 1000)           # other poses
+    assert model_stamp(tmp_path) != a
+    assert files_stamp([tmp_path / "cameras.bin", tmp_path / "nothing"]).startswith("1:") and files_stamp([]) is None
+
+
+def test_station_steps_follow_the_block(tmp_path):
+    """1.0.1: a station step's key holds the block's model and radiometric settings."""
+    import json
+    from rpp.ibr.single_sites import block_stamp, step_key
+    (tmp_path / "colmap" / "gui_native" / "sparse").mkdir(parents=True)
+    (tmp_path / "colmap" / "gui_native" / "sparse" / "cameras.bin").write_bytes(b"c")
+    (tmp_path / "processed").mkdir()
+    (tmp_path / "processed" / "mppp_config_v1p0.json").write_text(json.dumps({"config": {}}))
+    a = block_stamp(tmp_path)
+    assert a.startswith("model:") and "radiometry:None" not in a and "model:None" not in a
+    k = step_key(["mesh"], "", "code", block=a)
+    (tmp_path / "colmap" / "gui_native" / "sparse" / "cameras.bin").write_bytes(b"d")
+    assert step_key(["mesh"], "", "code", block=block_stamp(tmp_path)) != k            # aligned again
+    (tmp_path / "colmap" / "gui_native" / "sparse" / "cameras.bin").write_bytes(b"c")
+    assert step_key(["mesh"], "", "code", block=block_stamp(tmp_path)) == k
+    (tmp_path / "processed" / "mppp_config_v1p0.json").write_text(json.dumps({"config": {"color": {"scale_rad_to_int16": 1e5}}}))
+    assert step_key(["mesh"], "", "code", block=block_stamp(tmp_path)) != k            # other brightness
+
+
+def test_a_block_under_a_run_is_left_alone(tmp_path):
+    """1.0.1: a station is not made from a block whose run is going on (images, masks and model being rewritten)."""
+    import datetime, json, os, socket
+    from rpp.ibr.single_sites import block_busy
+    from rpp.runner import STATUS_FILE
+    assert block_busy(tmp_path) is None
+    st = {"state": "running", "pid": os.getpid(), "host": socket.gethostname(), "heartbeat": datetime.datetime.now().isoformat()}
+    (tmp_path / STATUS_FILE).write_text(json.dumps(st))
+    assert block_busy(tmp_path) == os.getpid()
+    (tmp_path / STATUS_FILE).write_text(json.dumps(dict(st, state="done")))
+    assert block_busy(tmp_path) is None
