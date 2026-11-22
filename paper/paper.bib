@@ -1,5 +1,13 @@
-% paper.bib for "MPPP: beyond the stereo baseline with Mars rover images"
-% Entries marked VERIFY were written from memory: check the DOI, pages and year before submission.
+% paper.bib for "RPP: open 3D assets and multi-station photogrammetry from Mars rover images"
+% Updated 21 Nov 2026 for the merged draft.
+% Check before submission (written from memory or from a partial read of the source):
+%   Peleg:2001, Hedman:2017, Hedman:2018 (volume, pages, DOI); Vona:2025 (arXiv preprint; one author shown on arXiv);
+%   Agisoft:2024 (version and year); Barnes:2018 (author order); VICAR (release year); Bhartia:2021 (author list);
+%   M2020:waypoints (cite the localization product or waypoint feed actually used, with its access date);
+%   Tate:RPP:zenodo (the concept DOI; on 21 Nov it resolved to release v1.0.0rc1. JOSS asks for the version DOI of
+%   the reviewed release at acceptance).
+% Not cited in the current draft, kept for later use: Bhartia:2021, Schoenberger:2016b, Lowe:2004, Tancik:2023,
+%   Kerbl:2023, Lindenberger:2023.
 
 @article{Bell:2021,
   author  = {Bell, J. F. and Maki, J. N. and Mehall, G. L. and Ravine, M. A. and Caplinger, M. A. and Bailey, Z. J. and Brylow, S. and Schaffner, J. A. and Kinch, K. M. and Madsen, M. B. and Winhold, A. and Hayes, A. G. and Corlies, P. and Tate, C. and Barrington, M. and Cisneros, E. and Jensen, E. and Paris, K. and Crawford, K. and Rojas, C. and Mehall, L. and Joseph, J. and Proton, J. B. and Cluff, N. and Deen, R. G. and Betts, B. and Cloutis, E. and Coates, A. J. and Colaprete, A. and Edgett, K. S. and Ehlmann, B. L. and Fagents, S. and Grotzinger, J. P. and Hardgrove, C. and Herkenhoff, K. E. and Horgan, B. and Jaumann, R. and Johnson, J. R. and Lemmon, M. and Paar, G. and Caballo-Perucha, M. and Gupta, S. and Traxler, C. and Preusker, F. and Rice, M. S. and Robinson, M. S. and Schmitz, N. and Sullivan, R. and Wolff, M. J.},
@@ -38,8 +46,7 @@
   year    = {2021},
   volume  = {217},
   pages   = {58},
-  doi     = {10.1007/s11214-021-00812-z},
-  note    = {VERIFY author list; WATSON is the SHERLOC context imager}
+  doi     = {10.1007/s11214-021-00812-z}
 }
 
 @article{Brown:2024,
@@ -121,8 +128,7 @@
   author       = {{Agisoft LLC}},
   title        = {{Agisoft Metashape} User Manual, Professional Edition, Version 2.2},
   year         = {2024},
-  howpublished = {\url{https://www.agisoft.com/downloads/user-manuals/}},
-  note         = {VERIFY version and year}
+  howpublished = {\url{https://www.agisoft.com/downloads/user-manuals/}}
 }
 
 @article{Beyer:2018,
@@ -144,16 +150,14 @@
   volume  = {5},
   number  = {7},
   pages   = {285--307},
-  doi     = {10.1002/2018EA000374},
-  note    = {Describes the PRoViP processing chain and PRo3D; VERIFY author order}
+  doi     = {10.1002/2018EA000374}
 }
 
 @misc{VICAR,
   author       = {{NASA Jet Propulsion Laboratory, Multimission Image Processing Laboratory}},
   title        = {{VICAR} Open Source},
   howpublished = {\url{https://github.com/NASA-AMMOS/VICAR}},
-  year         = {2024},
-  note         = {VERIFY the release year to cite}
+  year         = {2024}
 }
 
 @inproceedings{Schmauss:2025,
@@ -177,8 +181,7 @@
   author       = {{NASA Jet Propulsion Laboratory}},
   title        = {{Mars} 2020 {Perseverance} Rover Localization Waypoints},
   howpublished = {\url{https://mars.nasa.gov/mmgis-maps/M20/}},
-  year         = {2026},
-  note         = {VERIFY: cite the PDS localization product or the MMGIS waypoint feed actually used, and its access date}
+  year         = {2026}
 }
 
 @inproceedings{Tancik:2023,
@@ -199,13 +202,6 @@
   doi     = {10.1145/3592433}
 }
 
-@misc{TODO:opacity,
-  author = {{TODO}},
-  title  = {Source of the atmospheric opacity used in the illumination correction},
-  year   = {2026},
-  note   = {Replace with the tau product or paper actually used (for example the Mastcam-Z or MEDA opacity record), or cut the sentence}
-}
-
 @inproceedings{Lindenberger:2023,
   author    = {Lindenberger, Philipp and Sarlin, Paul-Edouard and Pollefeys, Marc},
   title     = {{LightGlue}: Local Feature Matching at Light Speed},
@@ -213,4 +209,58 @@
   year      = {2023},
   pages     = {17627--17638},
   doi       = {10.1109/ICCV51070.2023.01616}
+}
+
+@misc{Vona:2025,
+  author        = {Vona, Marsette},
+  title         = {The {Landform} Contextual Mesh: Automatically Fusing Surface and Orbital Terrain for {Mars} 2020},
+  year          = {2025},
+  eprint        = {2509.18330},
+  archiveprefix = {arXiv},
+  primaryclass  = {cs.RO},
+  howpublished  = {arXiv preprint arXiv:2509.18330},
+  url           = {https://arxiv.org/abs/2509.18330}
+}
+
+@article{Peleg:2001,
+  author  = {Peleg, Shmuel and Ben-Ezra, Moshe and Pritch, Yael},
+  title   = {Omnistereo: Panoramic Stereo Imaging},
+  journal = {IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  year    = {2001},
+  volume  = {23},
+  number  = {3},
+  pages   = {279--290},
+  doi     = {10.1109/34.910880}
+}
+
+@article{Hedman:2017,
+  author  = {Hedman, Peter and Alsisan, Suhib and Szeliski, Richard and Kopf, Johannes},
+  title   = {Casual {3D} Photography},
+  journal = {ACM Transactions on Graphics},
+  year    = {2017},
+  volume  = {36},
+  number  = {6},
+  pages   = {234:1--234:15},
+  doi     = {10.1145/3130800.3130828}
+}
+
+@article{Hedman:2018,
+  author  = {Hedman, Peter and Kopf, Johannes},
+  title   = {Instant {3D} Photography},
+  journal = {ACM Transactions on Graphics},
+  year    = {2018},
+  volume  = {37},
+  number  = {4},
+  pages   = {101:1--101:12},
+  doi     = {10.1145/3197517.3201384}
+}
+
+@software{Tate:RPP:zenodo,
+  author    = {Tate, Christian D.},
+  title     = {{RPP}: Rover Photogrammetry Pipeline},
+  year      = {2026},
+  version   = {1.0},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.24408629},
+  url       = {https://doi.org/10.5281/zenodo.24408629}
 }
