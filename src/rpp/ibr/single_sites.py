@@ -645,7 +645,7 @@ STATUS_FILE = "single_sites_status.json"
 INSTANCE: Dict[str, Optional[str]] = {"name": None}   # 0.99.50: --instance - its own status file (two runs at once)
 
 
-NOT_IN_CODE_KEY = ("single_sites.py", "web.py", "hf.py",     # the runner and the publishing (panos.json, Hugging Face)
+NOT_IN_CODE_KEY = ("single_sites.py", "web.py", "hf.py", "sketchfab.py",   # the runner and the publishing (panos.json, Hugging Face, Sketchfab)
                    "station_mesh.py")                         # 1.0.5: the full 3D model has its own stamp (model_code)
 
 # 1.0.5: the code of these hashes makes the same meshes, maps and panoramas as the code of the hash they name, so a
@@ -1236,6 +1236,12 @@ def add_parser(sub) -> None:
                    help="after the run, the stations' stereo JPEGs into DIR/panos and DIR/panos.json for the web "
                         "viewer (the page, rpp.viewer, is copied into DIR)")
     p.add_argument("--publish-only", action="store_true", help="with --publish or --upload: no steps, publish what --out holds")
+    p.add_argument("--sketchfab", action="store_true", help="1.0.6: after a station is published, its full 3D models "
+                   "(with the rover, and the terrain alone) to Sketchfab as DRAFTS - the account's API token from the "
+                   "environment variable RPP_SKETCHFAB_TOKEN; a failure never fails the run (rpp.ibr.sketchfab)")
+    p.add_argument("--sketchfab-license", default=None, metavar="SLUG", help="the license of new Sketchfab models (default: none set)")
+    p.add_argument("--sketchfab-test", action="store_true", help="1.0.6: nothing made - the token checked and the first "
+                   "named station that has a full 3D model uploaded as drafts; exit 0 when both went up")
     p.add_argument("--page-only", action="store_true", help="1.0.5: only the viewer page (index.html, vendor/) of this "
                    "installation into the viewer checkout (--publish DIR, default the RPV checkout), committed and "
                    "pushed (--no-upload: not) - no station is touched")
@@ -1406,6 +1412,27 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
         return 0
     if getattr(a, "page_only", False):
         return page_only(a.publish, upload=not getattr(a, "no_upload", False))
+    if getattr(a, "sketchfab_test", False):                      # 1.0.6: once, before a long run
+        from . import sketchfab as _sf
+        c = _sf.check()
+        print("single-sites --sketchfab-test:", c["message"], flush=True)
+        if not c["ok"]:
+            return 1
+        cfg_ = load_config(a.config)
+        root_ = Path(a.root or rpp_env.get("RPP_SCAPES") or r"D:\rover_blocks")
+        out_ = Path(a.out) if a.out else root_ / cfg_.get("out", "single_sites")
+        for lab in (a.labels or sol_order(list(cfg_["stations"]))):
+            if _sf.station_files(out_ / lab):
+                st_ = cfg_["stations"].get(lab) or {}
+                sols = viewer_sols(st_, lab) or []
+                name = f"Perseverance Sol {sols[0]}: {viewer_name(st_, lab)}" if sols else lab
+                r = _sf.upload_station(out_ / lab, lab, title=name, license_slug=getattr(a, "sketchfab_license", None))
+                print(r["message"], flush=True)
+                for v, m in r["models"].items():
+                    print(f"   {v}: {m.get('shading', '')}")
+                return 0 if r["ok"] and len(r["models"]) == 2 else 1
+        print(f"single-sites --sketchfab-test: no station with a full 3D model under {out_}")
+        return 1
     cfg = load_config(a.config)
     root = Path(a.root or rpp_env.get("RPP_SCAPES") or r"D:\rover_blocks")
     out_root = Path(a.out) if a.out else root / cfg.get("out", "single_sites")
@@ -1533,9 +1560,21 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
         plock = FileLock((git_dir if git_dir.is_dir() else Path(a.publish)) / PUBLISH_LOCK)
         plock.acquire(what="the viewer page")
         try:
-            return _publish_and_upload(labels, quiet, titles, use_hf, before)
+            msg = _publish_and_upload(labels, quiet, titles, use_hf, before)
         finally:
             plock.release()
+        if getattr(a, "sketchfab", False):                       # 1.0.6: drafts of the full 3D models; never fails the run
+            from . import sketchfab as _sf
+            for lab in labels:
+                try:
+                    t = titles.get(lab) or {}
+                    sols = t.get("sols") or []
+                    name = f"Perseverance Sol {sols[0]}: {t.get('site_name') or lab}" if sols else str(t.get("title") or lab)
+                    r = _sf.upload_station(Path(out_root) / lab, lab, title=name, license_slug=getattr(a, "sketchfab_license", None))
+                    print(r["message"], flush=True)
+                except Exception as e:                           # noqa: BLE001
+                    print(f"Sketchfab {lab}: failed ({type(e).__name__}: {e})", flush=True)
+        return msg
 
     def _publish_and_upload(labels, quiet, titles, use_hf, before):
         from . import web

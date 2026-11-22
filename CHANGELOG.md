@@ -40,6 +40,12 @@ again, not only its model.
   stay until the new ones are made, then the two are swapped in one frame (they were dropped before the new file was
   fetched).  Once a station is up, the 3D files of the stations before and after it are fetched in the background
   (four kept).  The headset holds two stations' textures for a moment during the swap.
+- **Full 3D models to Sketchfab as drafts** (`rpp.ibr.sketchfab`, `single-sites --sketchfab`, `--sketchfab-test`): after
+  a station is published, its full 3D model in the standard color - with the rover, and the terrain alone - is
+  uploaded as two drafts (never published from here), set shadeless, and recorded in `<station>/sketchfab.json`; a
+  station made again replaces its models' files.  The account's API token is read from the environment variable
+  `RPP_SKETCHFAB_TOKEN` and is written nowhere.  A failure never fails the run.  `--sketchfab-test` checks the token
+  and uploads one made station, for a trial before a long run.  Camera limits are set in Sketchfab's editor.
 - Bell Island Large's alignment "fail" is the attitude check, not the alignment: all 464 images registered at 0.56 px,
   but the frames' label attitudes differ from the solution by 2.8 deg at the 95th percentile (fail at 2), mostly the
   31 frames of S072D0000 (2.0 deg; the others 0.6-1.3) - the rover's pointing knowledge at that station.
