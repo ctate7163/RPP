@@ -218,7 +218,6 @@ def welcome_pano(web: Path, station_entry: Optional[Dict[str, Any]], pano_dir: O
     one alone before).  A view whose picture is not here (Van Zyl's pictures are on Hugging Face) keeps the welcome
     picture made before.  The page draws the words over it (an entry with "welcome": true).  None when Van Zyl is not
     published."""
-    import cv2
     if not station_entry:
         return None
     vs = station_entry.get("variants", [])
