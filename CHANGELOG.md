@@ -15,6 +15,11 @@ The development history before 1.0 is in
   Sun-distance term darkens those by 0.82, so the new scale puts them at 0.90 of their old level and the aphelion
   blocks at 1.31.  A block processed before 1.0.1 keeps its saved scale for its own images; its station frames get
   the factor with the distance term (`rpp.ibr.linear16.block_config`), the level of a block processed today.
+- Freeze: `--zcam-sites SITE ...` runs the zjoints step's site runs for those sites alone (the pipeline's own
+  `--zcam-sites`); the joints take the other sites' finished blocks as they are, and zfinal still runs every site.
+  The list stays with the run (a restart at logon keeps it; `--zcam-sites all` ends it).  For the 21 Nov restart of
+  freeze 3: Seitah Overlook, Issole / Seitah South and the four other blocks the Sun-distance term brightens by 16 %
+  or more (Belva, Rochette, Chal Rocks large, South Arm).
 - Mastcam-Z ZCAM08323 (sol 298, Issole; a focus sweep looking down 25 to 60 degrees) is in the low focus state
   (`298:ZCAM08323` in the shipped list): in the 21 Nov Z34 joint its left eye measured 4669.0 / 4677.5 / 4689.6 px
   at focus 138 / 516 / 786, on the low line (4678.8 / 4688.4 / 4695.2) and 1 % under the high line; run as high it

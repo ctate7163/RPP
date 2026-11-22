@@ -634,3 +634,28 @@ def test_new_root_is_seeded_with_the_backlash_lists_and_z26_promotes_from_one_bl
     from rpp_studies.calibration import run_pipeline as rp
     src = Path(rp.__file__).read_text(encoding="utf-8")
     assert '"--min-blocks", "1"' in src and "--zcam-one-block" in src
+
+
+def test_zcam_sites_limit_the_joints_step_and_stay_with_the_run(tmp_path):
+    """1.0.1 (Christian, 21 Nov 2026: "Only rerun the seitah and the dark blocks"): --zcam-sites reaches the zjoints
+    pipeline call alone (zfinal runs every site), is kept in the status for a restart without arguments, and
+    "all" ends it."""
+    root = _root(tmp_path)
+    (root / "cmods_from").mkdir()
+    (root / "cmods_from" / "M2020_N_rig.json").write_text(json.dumps({"source": "3 Nov"}), encoding="utf-8")
+    assert _run(root, "--zcam-sites", "seitah_overlook", "belva_crater_large") == 0
+    assert _status(root)["zcam_sites"] == ["seitah_overlook", "belva_crater_large"]
+    log = (root / "mppp_pipeline" / fz.LOG_FILE).read_text(encoding="utf-8")
+    calls = [ln for ln in log.splitlines() if "calibration.run_pipeline" in ln]
+    zj = [ln for ln in calls if "--redo zcam_runs zcam_joints" in ln]
+    zf = [ln for ln in calls if "--stop-before zcam_joints" in ln]
+    assert zj and all("--zcam-sites seitah_overlook belva_crater_large" in ln for ln in zj)
+    assert zf and not any("--zcam-sites" in ln for ln in zf)
+    assert "site runs for 2 site(s) only" in log
+    assert _run(root, "--redo", "zjoints") == 0                                   # a restart without the option
+    assert _status(root)["zcam_sites"] == ["seitah_overlook", "belva_crater_large"]
+    assert _run(root, "--redo", "zjoints", "--zcam-sites", "all") == 0
+    assert _status(root)["zcam_sites"] == []
+    last = [ln for ln in (root / "mppp_pipeline" / fz.LOG_FILE).read_text(encoding="utf-8").splitlines()
+            if "--redo zcam_runs zcam_joints" in ln][-1]
+    assert "--zcam-sites" not in last
