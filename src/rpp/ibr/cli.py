@@ -279,6 +279,9 @@ def add_parsers(sub) -> None:
     p.add_argument("--rover-zcam", action="store_true",
                    help="0.99.46: the Mastcam-Z frames color the rover too (a run with a dedicated Mastcam-Z deck pan in "
                         "stereo); default: the rover from the Navcam frames alone")
+    p.add_argument("--rover-part-from", default=None, metavar="DIR",
+                   help="1.0.6: the full 3D model's rover part copied from this folder (the Navcam run's with_rover of "
+                        "the same station), not made from this run's frames (a Mastcam-Z version)")
     p.add_argument("--fill-cameras", default="", metavar="LETTERS",
                    help="0.97.7: the station's frames of these camera families as fill-only sources - they color what "
                         "the panorama's own frames do not see (F: the front Hazcam pair, for the terrain under the arm; "
@@ -584,6 +587,7 @@ def cmd_ods(a: argparse.Namespace) -> int:
                          tone_levels_file=a.tone_levels, center_depth=not a.no_depth,
                          fill_families=a.fill_cameras, nadir_mark=not a.no_nadir_mark, site_name=a.site_name,
                          rover_zcam=getattr(a, "rover_zcam", False),
+                         rover_part_from=getattr(a, "rover_part_from", None),
                          nadir_mark_deg=a.nadir_mark_deg)
     if getattr(a, "station_mesh_only", False):
         print(f"station mesh part: {json.dumps(rep, default=str)[:600]}")

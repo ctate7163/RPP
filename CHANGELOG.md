@@ -9,6 +9,44 @@ The development history before 1.0 is in
 [`docs/history/`](https://github.com/ctate7163/rpp/tree/main/docs/history): `CHANGELOG_v0p95-v0p99.md`,
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
+## 1.0.6 — 22 Nov 2026 (branch v1p01)
+The panoramas change (the sky above the frames, small islands of other frames' colors), so every station is made
+again, not only its model.
+
+- **The panorama's sky is not extrapolated above what the frames saw** (`skyline_sky`, `SKY_HOLD`; Rockytop in the
+  headset: "the top pole has artifacts in the sky").  The sky above the skyline is a fit - a cubic in elevation with
+  three azimuth harmonics - to the sky the frames saw, which at Rockytop ends at about 33 deg; evaluated to the zenith
+  it ran to a dark red patch at 50-75 deg (Sol0461) and to a violet oval (Wildcat Ridge).  Above the highest fitted
+  elevation the fit is now held there, and its azimuth terms fade out over 15 deg: one color per row up high.
+- **A small island colored only by a frame of another place or time takes its rim's colors** (`fill_islands`; "the
+  white disc at Van Zyl's rock").  The station's own frames do not see that spot (the rover's deck is in front of it
+  in the one frame that looks there), so a context frame of sol 49, taken 8 m away at another time of day, colored it:
+  sunlit there, in the rock's shadow in the station's frames - a light disc in dark ground.  Islands of context or
+  fill-only colors up to 0.6 deg² that the station's own frames ring are now filled from their rim.
+- **The terrain is held under the mast's skyline** (`pano_skyline`, `SkyCeiling`; "the white fill behind Skinner's
+  crest").  Behind Skinner Ridge's crest the mesh's top surfaces stood up to a meter above the line where the frames
+  see sky; seen from the mast those directions are sky, so they took the sky's white (64 m² of the 1.0.4 model within
+  19 m, 91 % of it in directions where the panorama shows sky).  Free-space carving from the mast: where the panorama
+  shows sky nothing solid lies along the ray, so the one-sheet terrain is held under the skyline's ray of its azimuth -
+  0.1 deg above it at the crest (the crest that makes the skyline stays), 0.3 deg under it behind the crest (what the
+  mast did not see stays hidden from it and takes the crest's colors), nothing within 3 m or under a skyline below the
+  horizon.  Skinner Ridge: 49 m² lowered by 0.17 m (median), all beyond 10 m in azimuths 270-30 deg; Rockytop,
+  Wildcat Ridge and Van Zyl: nothing.
+- **A Mastcam-Z version's full 3D rover is its Navcam station's** (`--rover-part-from`, `copy_part`; "The z34 full 3d
+  should use the ncam rover texture").  Its own frames do not color the rover (they are no deck pan) and its context
+  frames never do, so its rover was mostly gray; the two runs share the pivot and the rover model, so the Navcam run's
+  rover part is copied in.
+- **Viewer: no black screen between stations; the neighbors' 3D files fetched ahead.**  The old station's surfaces
+  stay until the new ones are made, then the two are swapped in one frame (they were dropped before the new file was
+  fetched).  Once a station is up, the 3D files of the stations before and after it are fetched in the background
+  (four kept).  The headset holds two stations' textures for a moment during the swap.
+- Bell Island Large's alignment "fail" is the attitude check, not the alignment: all 464 images registered at 0.56 px,
+  but the frames' label attitudes differ from the solution by 2.8 deg at the 95th percentile (fail at 2), mostly the
+  31 frames of S072D0000 (2.0 deg; the others 0.6-1.3) - the rover's pointing knowledge at that station.
+- Not in this version: sewing `mesh.ply`'s sheets.  The viewer's terrain is one sheet; in the panoramas the rays that
+  pass through a crack are a few hundred pixels of an 8k eye (Van Zyl 432, Rockytop 243, Skinner Ridge 236) - the thin
+  light lines on Van Zyl's rock among them.
+
 ## 1.0.5 — 22 Nov 2026 (branch v1p01)
 The full 3D model only; meshes, depth maps and panoramas are those of 1.0.4.
 

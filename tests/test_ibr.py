@@ -3898,3 +3898,50 @@ def test_one_skyline_and_a_smooth_sky():
     assert rgb[120, 600, 0] > 150                                                  # the floater is sky
     assert rgb[hr[len(hr) // 2], hc[len(hc) // 2], 0] < 120                        # the speck has the hills' color
     assert np.ptp(s[:, ::90], axis=1).max() < 6                                    # smooth in azimuth near the zenith
+
+
+def test_the_sky_fit_is_held_above_the_frames_and_islands_take_their_rim():
+    """1.0.6 (Christian, 22 Nov 2026): the sky fit is not extrapolated above the sky the frames saw ("the top pole has
+    artifacts in the sky" - Rockytop's dark red patch at 50-75 deg); and a small island that only a frame of another
+    place or time colors takes its rim's colors ("the white disc at Van Zyl's rock")."""
+    from rpp.ibr import ods as O
+    from rpp.ibr.raycast import LABEL_FAR, LABEL_MESH
+    H, W = 360, 720
+    el = 90.0 - (np.arange(H)[:, None] + 0.5) / H * 180.0
+    az = (np.arange(W)[None, :] + 0.5) / W * 2 * np.pi
+    label = np.where(el > 2.0, LABEL_FAR, LABEL_MESH).astype(np.uint8) * np.ones((1, W), np.uint8)
+    elw = np.broadcast_to(el, (H, W))
+    base = 150.0 + 30.0 * np.cos(np.radians(elw)) * (1.0 + 0.25 * np.cos(az) + 0.15 * np.sin(2 * az))   # azimuth structure
+    rgb0 = np.stack([base * 1.05, base, base * 0.92], axis=-1)
+    rgb0[elw <= 2.0] = 60.0
+    source = np.where((elw > 2.0) & (elw < 30.0) | (elw <= 2.0), 0, -1).astype(np.int16)   # the frames see the sky to 30 deg
+    results = {}
+    for hold in (False, True):
+        O.SKY_HOLD = hold
+        try:
+            rgb = rgb0.astype(np.uint16).copy()
+            assert O.skyline_sky(rgb, label, source)
+        finally:
+            O.SKY_HOLD = True
+        up = rgb[elw[:, 0] > 50.0].astype(float)
+        results[hold] = (float(up.max()), float(up.min()), float(np.ptp(up[:, :, 1], axis=1).max()))
+    seen_range = (float(rgb0[(elw > 2) & (elw < 30)].min()), float(rgb0[(elw > 2) & (elw < 30)].max()))
+    hi, lo, spread = results[True]
+    assert seen_range[0] - 10 < lo and hi < seen_range[1] + 10                      # within what the frames saw
+    assert spread < 3.0                                                            # one color per row up high
+    assert results[False][2] > spread                                              # (without the hold: the harmonics run on)
+    # islands
+    H, W = 1800, 3600                                                              # 10 px per degree
+    rgb = np.full((H, W, 3), 50, np.uint8)
+    source = np.zeros((H, W), np.int16)
+    label = np.full((H, W), LABEL_MESH, np.uint8)
+    rgb[1250:1256, 300:306] = 220                                                  # a light disc of 0.36 deg2 ...
+    source[1250:1256, 300:306] = 1                                                 # ... from a context frame
+    rgb[1100:1200, 500:600] = 120
+    source[1100:1200, 500:600] = 1                                                 # a large area of it: stays
+    import types
+    srcs = [types.SimpleNamespace(context=False, fill_only=False), types.SimpleNamespace(context=True, fill_only=True)]
+    rep = O.fill_islands(rgb, source, label, srcs)
+    assert rep["islands"] == 1 and rep["px"] == 36
+    assert int(rgb[1250:1256, 300:306].max()) <= 52 and (source[1250:1256, 300:306] == -6).all()
+    assert (rgb[1100:1200, 500:600] == 120).all()

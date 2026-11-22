@@ -309,8 +309,112 @@ def under_floaters(rc, base: np.ndarray, h: np.ndarray, hit: np.ndarray, inside:
     return H2[inside], rec
 
 
+SKY_CEILING = True              # 1.0.6: the terrain is held under the mast's skyline (see pano_skyline, sky_ceiling)
+SKY_CEILING_MARGIN_DEG = 0.1    # ... this much above it at the crest (where the terrain meets the skyline) ...
+SKY_CEILING_BEHIND_DEG = 0.3    # ... and this much under it behind the crest (seen from the mast it is then hidden)
+SKY_CEILING_BEHIND_M = 0.25     # behind: farther than the crest of its azimuth by this much
+SKY_CEILING_BIN_DEG = 0.25      # the crest's range is found per this much azimuth
+SKY_CEILING_SMOOTH_DEG = 0.3    # the skyline smoothed over this much azimuth (Gaussian sigma) before it is used
+SKY_CEILING_MEDIAN_DEG = 0.5    # ... after a median over this much (a speck of sky or terrain in one column)
+SKY_CEILING_FROM_M = 3.0        # nearer than this nothing is carved (the rover's own parts, the deck, the mast's shadow)
+SKY_CEILING_MIN_EL_DEG = 0.0    # ... nor under a skyline lower than this (below the horizon a bright far slope looks like sky)
+
+
+def pano_skyline(pano: np.ndarray) -> Optional[np.ndarray]:
+    """1.0.6: the skyline of an equirectangular eye (row 0 the zenith; linear or 8-bit): per column, the elevation (deg)
+    of the highest pixel that is not sky.  The sky is what is joined to the zenith through pixels as bright as the
+    sky - brighter than midway (log) between the sky high up and the ground below the horizon - and not much redder
+    than the sky's own color in that row (the terrain is redder).  None when the eye has too little sky or ground."""
+    import cv2
+    from scipy import ndimage as ndi
+    P = np.ascontiguousarray(np.asarray(pano, np.float32)[..., :3])
+    H0, W0 = P.shape[:2]
+    W = min(W0, 8192)
+    H = max(2, int(round(H0 * W / W0)))
+    small = cv2.resize(P, (W, H), interpolation=cv2.INTER_AREA) if W != W0 else P
+    el = 90.0 - (np.arange(H) + 0.5) / H * 180.0
+    lum = np.log1p(small.mean(axis=2))
+    rb = np.log1p(small[..., 0]) - np.log1p(small[..., 2])
+    hi, lo = el >= 45.0, (el < -5.0) & (el > -40.0)
+    if not hi.any() or not lo.any():
+        return None
+    sky_l, gnd_l = float(np.median(lum[hi])), float(np.median(lum[lo]))
+    if not sky_l > gnd_l + 0.05:
+        return None
+    cut = 0.5 * (sky_l + gnd_l)
+    rb_sky = np.median(np.where(lum > cut, rb, np.nan)[el > 10.0], axis=1)        # the sky's red / blue by row
+    rb_sky = np.where(np.isfinite(rb_sky), rb_sky, float(np.nanmedian(rb_sky)) if np.isfinite(rb_sky).any() else 0.0)
+    rb_gnd = float(np.median(rb[lo]))
+    rb_cut = np.full(H, np.inf)
+    rows10 = np.flatnonzero(el > 10.0)
+    if rb_gnd > float(np.median(rb_sky)) + 0.03:                 # the sky is told from the terrain by color too
+        rb_cut[rows10] = rb_sky + 0.5 * (rb_gnd - rb_sky)
+        rb_cut[el <= 10.0] = float(rb_sky[-1]) + 0.5 * (rb_gnd - float(rb_sky[-1]))
+    cand = (lum > cut) & (rb < rb_cut[:, None]) & (el > -10.0)[:, None]
+    lab_, n = ndi.label(cand)
+    ids = np.unique(lab_[0][lab_[0] > 0])
+    if not len(ids):
+        return None
+    sky = np.isin(lab_, ids)
+    first = np.where(sky.all(axis=0), H - 1, np.argmax(~sky, axis=0))
+    sk = el[first]
+    k = max(3, int(round(SKY_CEILING_MEDIAN_DEG / 360.0 * W)) | 1)
+    sk = ndi.median_filter(sk, size=k, mode="wrap")
+    sk = ndi.gaussian_filter1d(sk, max(SKY_CEILING_SMOOTH_DEG / 360.0 * W, 0.5), mode="wrap")
+    return sk.astype(np.float64)
+
+
+class SkyCeiling:
+    """1.0.6 (Christian, 22 Nov 2026: "the white fill behind Skinner's crest" - the mesh's top surfaces behind the crest
+    stand up to a meter above the line where the frames see sky; seen from the mast they take the sky's white): free-
+    space carving from the mast.  Where the panorama shows sky in a direction, nothing solid lies along that ray.
+
+    ``skyline_deg`` per panorama column (:func:`pano_skyline`), ``azimuth0_deg`` the azimuth of column 0's left edge.
+    :meth:`limit` gives, for points (n, 3) with heights ``h`` above the pivot, the height each may have:
+
+    * at the crest of its azimuth (the nearest place where the terrain reaches the skyline's ray) and before it,
+      the ray plus ``SKY_CEILING_MARGIN_DEG``: the crest that makes the skyline stays;
+    * behind the crest (farther by ``SKY_CEILING_BEHIND_M``), ``SKY_CEILING_BEHIND_DEG`` under the ray: what the mast
+      did not see stays hidden from it - the ridge's top beyond takes the crest's colors, not the sky's;
+    * nothing nearer than ``SKY_CEILING_FROM_M``, nor under a skyline lower than ``SKY_CEILING_MIN_EL_DEG``."""
+
+    def __init__(self, skyline_deg, azimuth0_deg: float, pivot, up, north, east):
+        self.sk = np.asarray(skyline_deg, float)
+        self.az0 = float(azimuth0_deg)
+        self.P, self.u, self.n, self.e = (np.asarray(x, float) for x in (pivot, up, north, east))
+
+    def where(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(horizontal distance r, azimuth from column 0 in deg, the skyline's elevation there in deg) of points."""
+        v = np.asarray(X, float) - self.P
+        x, y = v @ self.e, v @ self.n
+        r = np.hypot(x, y)
+        az = (np.degrees(np.arctan2(x, y)) - self.az0) % 360.0
+        W = len(self.sk)
+        c = az / 360.0 * W - 0.5
+        i0 = np.floor(c).astype(np.int64)
+        f = c - i0
+        return r, az, self.sk[i0 % W] * (1.0 - f) + self.sk[(i0 + 1) % W] * f
+
+    def limit(self, X: np.ndarray, h: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+        r, az, el = self.where(X)
+        h = np.asarray(h, float)
+        use = (r >= SKY_CEILING_FROM_M) & (el >= SKY_CEILING_MIN_EL_DEG)
+        e_pt = np.degrees(np.arctan2(h, np.maximum(r, 1e-6))) - el          # the point's elevation over the skyline
+        nb = int(round(360.0 / SKY_CEILING_BIN_DEG))
+        b = np.minimum((az / 360.0 * nb).astype(np.int64), nb - 1)
+        crest = np.full(nb, np.inf)
+        touch = use & (e_pt > -0.05)
+        np.minimum.at(crest, b[touch], r[touch])
+        crest = np.minimum.reduce([np.roll(crest, k) for k in (-2, -1, 0, 1, 2)])    # (a neighbor bin's crest counts)
+        behind = r > crest[b] + SKY_CEILING_BEHIND_M
+        lim = r * np.tan(np.radians(np.clip(el + np.where(behind, -SKY_CEILING_BEHIND_DEG, SKY_CEILING_MARGIN_DEG), -80.0, 80.0)))
+        lim = np.where(use, lim, np.inf)
+        over = h > lim
+        return lim, {"cells": int(over.sum()), "behind_the_crest": int((over & behind).sum())}
+
+
 def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: int, fill: Optional[np.ndarray] = None,
-              step_m: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+              step_m: Optional[float] = None, ceiling=None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """1.0.5 (Christian, 21 and 22 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; "Van zyl looks a lot
     better. There are still some holes though"): the viewer's terrain as ONE sheet - the top surface of the mesh
     (V, F), sampled straight down on a grid of ``step_m`` and simplified to ``target`` triangles.
@@ -363,6 +467,22 @@ def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: 
     pit = (Hc - H > TOP_PIT_DEPTH_M) & (H > -5e3)
     H = np.where(pit, Hc, H)
     rec["pits_raised"] = int(pit.sum())
+    if ceiling is not None:                                     # 1.0.6: under the mast's skyline (SkyCeiling)
+        try:
+            ok_ = inside & (H > -5e3)
+            top_h = np.full(A.shape, np.inf)
+            top_h[ok_], info = ceiling.limit(P + A[ok_][:, None] * e1 + B[ok_][:, None] * e2, H[ok_])
+            over = ok_ & (H > top_h)
+            dh = (H - top_h)[over]
+            H = np.where(over, top_h, H).astype(np.float32)
+            rec["sky_ceiling"] = {"cells": int(over.sum()), "m2": round(float(over.sum()) * g * g, 2),
+                                  "behind_the_crest_m2": round(info["behind_the_crest"] * g * g, 2),
+                                  "lowered_by_m_median": round(float(np.median(dh)), 3) if len(dh) else 0.0,
+                                  "lowered_by_m_max": round(float(dh.max()), 3) if len(dh) else 0.0,
+                                  "margin_deg": SKY_CEILING_MARGIN_DEG, "behind_deg": SKY_CEILING_BEHIND_DEG,
+                                  "from_m": SKY_CEILING_FROM_M}
+        except Exception as e:                                  # noqa: BLE001 - the sheet as it is
+            log.warning("station mesh: the sky ceiling was not applied (%s)", e)
     ok = inside & (H > -5e3)
     idx = np.full(A.shape, -1, np.int64)
     idx[ok] = np.arange(int(ok.sum()))
@@ -489,7 +609,8 @@ def simplify_in_steps(V: np.ndarray, F: np.ndarray, target: int, pivot, up, step
     return V, F, passes
 
 
-def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TARGET_TRIANGLES) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TARGET_TRIANGLES, ceiling=None,
+                 ceiling_key=None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """(V, F, record) of the scene's mesh within ``radius_m`` of the mast axis, without the rover model, simplified:
     as one sheet (1.0.5, :func:`top_sheet`), or - ``TOP_SHEET`` off, or the sheet failed - its triangles simplified."""
     from .mesh import decimate_and_smooth, horizontal_distance, keep_triangles
@@ -513,12 +634,14 @@ def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TAR
             kw = wide[F].any(axis=1)
             if rt is not None:
                 kw[rt[0]:rt[1]] = False
-            key = (float(radius_m), int(target), TOP_STEP_M, TOP_RANGE_POWER, tuple(np.round(np.asarray(pivot, float), 6)))
+            key = (float(radius_m), int(target), TOP_STEP_M, TOP_RANGE_POWER, tuple(np.round(np.asarray(pivot, float), 6)),
+                   ceiling_key)
             cache = getattr(scene, "_top_sheet", None)
             if cache is not None and cache[0] == key:           # the terrain and the scape parts ask for the same sheet
                 Vt, Ft, top = cache[1]
             else:
-                Vt, Ft, top = top_sheet(V, F[kw], pivot, up, radius_m, target, fill=None if fill is None else fill[kw])
+                Vt, Ft, top = top_sheet(V, F[kw], pivot, up, radius_m, target, fill=None if fill is None else fill[kw],
+                                        ceiling=ceiling)
                 try:
                     scene._top_sheet = (key, (Vt, Ft, top))
                 except Exception:                               # noqa: BLE001 - a scene that takes no attribute
@@ -1621,7 +1744,16 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     t0 = time.time()
     P, up, north, east = (np.asarray(x, float) for x in (station.pivot, station.up, station.north, station.east))
     up = _unit(up)
-    V, F, rec = terrain_mesh(scene, P, up, radius_m, target)
+    ceiling = ceiling_key = None
+    if SKY_CEILING and sky_pano is not None:                    # 1.0.6: held under the mast's skyline
+        try:
+            sk = pano_skyline(sky_pano[0])
+            if sk is not None:
+                ceiling = SkyCeiling(sk, float(sky_pano[1]), P, up, north, east)
+                ceiling_key = ("sky", round(float(np.sum(sk)), 3), float(sky_pano[1]))
+        except Exception as e:                                  # noqa: BLE001 - the terrain as the mesh has it
+            log.warning("station mesh: no skyline from the panorama (%s) - the terrain is not held under it", e)
+    V, F, rec = terrain_mesh(scene, P, up, radius_m, target, ceiling=ceiling, ceiling_key=ceiling_key)
     C = P + float(center_above_m) * up
     nrm, area = triangle_normals(V, F)
     rc = _raycaster(V, F)
@@ -1971,6 +2103,34 @@ def write_part(out_dir: PathLike, prefix: str, kind: str, part: Dict[str, Any], 
     rec = dict(part["record"], kind=kind, files=[stem + ".npz", stem + ".jpg"] + files16, vertices=int(len(Vp)), mesh_triangles=int(len(part["F"])),
                model_code=model_code())
     (out / (stem + ".json")).write_text(json.dumps(rec, indent=1), encoding="utf-8")
+    return rec
+
+
+def copy_part(src_dir: PathLike, dst_dir: PathLike, prefix: str, kind: str = "rover") -> Optional[Dict[str, Any]]:
+    """1.0.6 (Christian, 22 Nov 2026: "The z34 full 3d should use the ncam rover texture"): a part made by another run
+    of the same station - the Navcam run's rover, for its Mastcam-Z version, whose own frames do not color the rover
+    (they are not a deck pan) and whose context frames never do - copied in under this run's ``prefix``.  The two
+    runs share the pivot (1.0.1) and the rover model, so the geometry is the same.  None when ``src_dir`` holds no
+    such part."""
+    src, dst = Path(src_dir), Path(dst_dir)
+    recs = sorted(src.glob(f"*_{PART[kind]}.json"))
+    if len(recs) != 1:
+        return None
+    sstem = recs[0].name[: -len(".json")]
+    rec = json.loads(recs[0].read_text(encoding="utf-8"))
+    dstem = f"{prefix + '_' if prefix else ''}{PART[kind]}"
+    files = []
+    for f in rec.get("files") or []:
+        sf = src / f
+        if not sf.is_file():
+            if f.endswith((".npz", ".jpg")):
+                return None
+            continue
+        df = dst / (dstem + f[len(sstem):] if f.startswith(sstem) else f)
+        df.write_bytes(sf.read_bytes())
+        files.append(df.name)
+    rec = dict(rec, files=files, copied_from=str(recs[0]))
+    (dst / (dstem + ".json")).write_text(json.dumps(rec, indent=1), encoding="utf-8")
     return rec
 
 

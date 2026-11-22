@@ -1354,3 +1354,78 @@ def test_the_rover_is_textured_where_the_frames_see_it_even_where_their_masks_mi
     monkeypatch.setattr(SM, "viewpoints", lambda pivot, *a, **k: np.asarray(pivot, float)[None] + [[0.0, 0.0, -50.0]])
     r2 = SM.rover_part(sc, src, st, size=256)["record"]
     assert r2["textured_triangles"] == r2["seen_by_frames"] == r2["seen_by_frames_only"] > 0
+
+
+def test_the_terrain_is_held_under_the_mast_skyline():
+    """1.0.6 (Christian, 22 Nov 2026: "the white fill behind Skinner's crest"): where the panorama shows sky, nothing
+    solid lies along the ray.  A ridge 15 m north whose top the mesh carries on behind the crest, 0.6 m above the line
+    where the panorama sees sky: the crest stays, the top behind it goes under the skyline's ray; the other azimuths,
+    and anything within 3 m, are not touched."""
+    from rpp.ibr import station_mesh as SM
+    H, W = 900, 1800
+    el = 90.0 - (np.arange(H)[:, None] + 0.5) / H * 180.0
+    az = (np.arange(W)[None, :] + 0.5) / W * 360.0
+    P = np.array([0.0, 0.0, 2.0]); up, north, east = np.array([0, 0, 1.0]), np.array([0, 1.0, 0]), np.array([1.0, 0, 0])
+    crest_el = np.degrees(np.arctan2(3.0 - 2.0, 15.0))           # the crest: 3 m high at 15 m north, seen from 2 m
+    sky_line = np.where(np.abs(((az + 180) % 360) - 180) < 30, crest_el, -3.0)    # the ridge within 30 deg of north
+    pano = np.where((el > sky_line)[..., None], np.array([230.0, 200.0, 190.0]), np.array([120.0, 70.0, 50.0])).astype(np.float32)
+    sk = SM.pano_skyline(pano)
+    assert sk is not None and abs(float(sk[0]) - crest_el) < 0.5 and abs(float(sk[W // 2])) < 4.0
+    c = SM.SkyCeiling(sk, 0.0, P, up, north, east)
+    Vg, Fg = _grid(n=241, half=24.0)                              # 0.2 m cells
+    Vg = Vg.copy()
+    y = Vg[:, 1]
+    ridge = (y >= 15.0) & (np.abs(Vg[:, 0]) < 6.0)
+    Vg[ridge, 2] = 3.0 + 0.04 * (y[ridge] - 15.0) * 15.0          # the top rises behind the crest (0.6 m over 1 m...)
+    Vg[(np.abs(Vg[:, 0]) < 0.3) & (np.abs(y - 1.5) < 0.3), 2] = 4.0   # a mast-like post at 1.5 m: left alone
+    Vt, Ft, rec = SM.top_sheet(Vg, Fg, P, up, 20.0, 60000, step_m=0.1, ceiling=c)
+    sc = rec["sky_ceiling"]
+    assert sc["m2"] > 5.0 and sc["behind_the_crest_m2"] > 0.8 * sc["m2"] and sc["lowered_by_m_max"] < 4.0
+    rc = SM._raycaster(Vt, Ft)
+
+    def h(x, yy):
+        t, _ = SM._cast(rc, np.array([[x, yy, 50.0]]), np.array([[0.0, 0.0, -1.0]]))
+        return 50.0 - float(t[0])
+    assert abs(h(0.0, 15.05) - 3.0) < 0.1                         # the crest stays
+    r = 18.0
+    assert h(0.0, r) < 2.0 + r * np.tan(np.radians(crest_el))      # behind it: under the skyline's ray ...
+    assert h(0.0, r) > 2.0 + r * np.tan(np.radians(crest_el - 1.0))  # ... by a fraction of a degree
+    assert h(0.0, 1.5) > 3.5                                      # nearer than 3 m: not touched
+    assert abs(h(-10.0, -10.0)) < 0.05                            # other azimuths: as they were
+
+
+def test_a_mastcam_z_version_takes_the_navcam_runs_rover(tmp_path):
+    """1.0.6 (Christian, 22 Nov 2026: "The z34 full 3d should use the ncam rover texture"): the planned rover step of a
+    Mastcam-Z version names its Navcam station's with_rover folder, and copy_part brings that part in under its own
+    prefix."""
+    import json as _json
+    from rpp.ibr import single_sites as SS, station_mesh as SM
+    cfg = SS.load_config()
+    for z, n in (("Sol0011_Z34", "Sol0009"), ("Sol0690_Z34", "Sol0686")):
+        r = SS.plan(cfg, tmp_path, labels=[z], station_mesh=True)[0]
+        a = next(c["argv"] for c in r["commands"] if c["step"] == "ods" and c["variant"] == "rover")
+        assert a[a.index("--rover-part-from") + 1].endswith(str(__import__("pathlib").Path(n) / "with_rover"))
+        m = next(c["argv"] for c in r["commands"] if c["step"] == "ods" and c["variant"] == "masked")
+        assert "--rover-part-from" not in m
+    src, dst = tmp_path / "nav", tmp_path / "z"
+    src.mkdir(); dst.mkdir()
+    for ext, data in ((".npz", b"npz"), (".jpg", b"jpg"), ("_16.png", b"png")):
+        (src / f"Sol0009_rover_station_mesh_rover{ext}").write_bytes(data)
+    (src / "Sol0009_rover_station_mesh_rover.json").write_text(_json.dumps({"kind": "rover", "model_code": "m", "files": [
+        "Sol0009_rover_station_mesh_rover.npz", "Sol0009_rover_station_mesh_rover.jpg", "Sol0009_rover_station_mesh_rover_16.png"]}))
+    rec = SM.copy_part(src, dst, "Sol0011_Z34", "rover")
+    assert rec["files"] == ["Sol0011_Z34_station_mesh_rover.npz", "Sol0011_Z34_station_mesh_rover.jpg", "Sol0011_Z34_station_mesh_rover_16.png"]
+    assert (dst / "Sol0011_Z34_station_mesh_rover.jpg").read_bytes() == b"jpg" and rec["model_code"] == "m"
+    assert SM.copy_part(tmp_path / "none", dst, "x") is None
+
+
+def test_the_viewer_keeps_the_old_station_until_the_new_one_is_up():
+    """1.0.6 (Christian, 22 Nov 2026): no black screen between stations - the old surfaces are dropped only once the new
+    ones are made; the neighbors' 3D files are fetched ahead."""
+    from pathlib import Path
+    from rpp.ibr import single_sites as SS
+    page = (Path(SS.__file__).resolve().parents[1] / "viewer" / "index.html").read_text(encoding="utf-8")
+    i = page.index("async function showRover(")
+    body = page[i:page.index("async function loadSurface(")]
+    assert body.index("dropRover();                                                 // 1.0.6") > body.index("await loadSurface(")
+    assert "const buf = await fetchGlb(" in page and "prefetchNeighbors();" in page and "GLB_CACHE = 4" in page

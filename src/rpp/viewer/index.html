@@ -567,10 +567,38 @@ function dropRover() {
 // rover surface of the third mode, colored from the pivot's panorama at its full resolution), drawn in place of the
 // station mesh's own rover part (Christian: "The rover texture in the '3d terrain and rover' looks a lot worse than the
 // 'terrain with rover (3D model)' version")
+// 1.0.6 (Christian, 22 Nov 2026: "it takes too long to load the next site, and the vr screen is black while it
+// switches over. How can we keep the old site until the new one is ready to display? And how can we pre download the
+// next sites 3d assets so they are ready to go earlier?"): the old surfaces stay on until the new ones are made, then
+// the two are swapped in one frame; and the 3D files of the stations before and after this one are fetched in the
+// background once it is up (GLB_CACHE files kept, the oldest dropped)
+const GLB_CACHE = 4;
+const glbCache = new Map();                                      // url -> Promise<ArrayBuffer>
+function fetchGlb(url) {
+  let pr = glbCache.get(url);
+  if (pr) { glbCache.delete(url); glbCache.set(url, pr); return pr; }      // the newest last
+  pr = fetch(url).then(r => { if (!r.ok) throw new Error(`${r.status} ${r.statusText}`); return r.arrayBuffer(); });
+  pr.catch(() => glbCache.delete(url));
+  glbCache.set(url, pr);
+  while (glbCache.size > GLB_CACHE) glbCache.delete(glbCache.keys().next().value);
+  return pr;
+}
+function fileOfStation(q) {                                      // the 3D file the page would open at station q
+  if (!q) return null;
+  const vs = variants(q), here = (variants(panos[cur.s] || {})[cur.v] || {}).key;
+  const v = vs.find(x => x.key === here && x.station_mesh) || vs.find(x => x.key === 'scape3d') || vs.find(x => x.station_mesh);
+  return v && v.station_mesh && v.station_mesh.file ? new URL(v.station_mesh.file, base).href : null;
+}
+function prefetchNeighbors() {
+  if (!panos.length) return;
+  for (const d of [1, -1]) {
+    const u = fileOfStation(panos[(cur.s + d + panos.length) % panos.length]);
+    if (u) fetchGlb(u).catch(e => console.warn('prefetch', u, e));
+  }
+}
 async function showRover(rs, opt = {}) {
   const id = ++roverId;
-  dropRover();
-  if (!rs || !rs.file) return;
+  if (!rs || !rs.file) { dropRover(); return; }
   const made = [];
   try {
     let fadeU = null;
@@ -583,6 +611,7 @@ async function showRover(rs, opt = {}) {
       if (id !== roverId) break;
     }
     if (id !== roverId) { for (const m of made) { m.geometry.dispose(); for (const o of m.userData.textures) o.dispose(); m.material.dispose(); } return; }
+    dropRover();                                                 // 1.0.6: the old station off only now, in the same frame
     roverParts = made;
     for (const m of made) (m.userData.kind === 'rover' ? roverGroup : groundGroup).add(m);
     if (rs.drive && rs.whole) driveStart(rs.drive);              // 0.99.33: the sixth mode
@@ -591,11 +620,14 @@ async function showRover(rs, opt = {}) {
     surfState = { file: rs.file, noHorizon: !!rs.noHorizon, drive: !!(rs.drive && rs.whole), shader: opt.normals ? 'n' : opt.distance ? 'd' : 'c', skin: opt.skin || null };
     if (wholeScene) for (const k in spheres) spheres[k].visible = false;
     anchored = false;
-  } catch (e) { console.warn('rover surface', e); }
+  } catch (e) {
+    console.warn('rover surface', e);
+    if (id === roverId) { for (const m of made) { m.geometry.dispose(); for (const o of m.userData.textures) o.dispose(); m.material.dispose(); } dropRover(); }
+  }
 }
 async function loadSurface(rs, opt) {                            // -> {made: [meshes], fade: the terrain's fade uniform}
   {
-    const buf = await (await fetch(new URL(rs.file, base).href)).arrayBuffer();
+    const buf = await fetchGlb(new URL(rs.file, base).href);          // 1.0.6: perhaps fetched ahead
     const dv = new DataView(buf);
     if (dv.getUint32(0, true) !== 0x46546C67) throw new Error('not a .glb file');
     const n = dv.getUint32(12, true), doc = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, n)));
@@ -751,7 +783,7 @@ const VIEWER_NAME = 'Rover Photogrammetry Viewer (RPV)';
 // 0.99.36 (Christian, 19 Nov 2026: "please put the rpp-rpv viewer version number on the lower left above the site name,
 // images size, and version on which the site was rendered"): the page's own version (the RPP release that wrote it;
 // tests/test_station_mesh.py keeps it equal to rpp.__version__), above the station's line
-const RPV_VERSION = '1.0.5';
+const RPV_VERSION = '1.0.6';
 $('ver').textContent = `RPV viewer ${RPV_VERSION}`;
 const CREDIT = 'Created by Christian Tate at MSSS';   // 0.99.14 (Christian, 17 Nov 2026: 'remove the "for research purposes" phrase')
 // 0.99.39 (Christian, 19 Nov 2026: "remove the code: ... text from the welcome screen"): the credit alone, no link to
@@ -1194,6 +1226,7 @@ async function show() {
                  (p.rpp || p.mppp) ? `rendered with RPP ${p.rpp || p.mppp}` : ''];
     setNote();
     msg('');
+    prefetchNeighbors();                                         // 1.0.6: the next and previous stations' 3D files
   } catch (e) { if (id === loadId) msg(`could not load ${url}: ${e.message || e}`); }
 }
 

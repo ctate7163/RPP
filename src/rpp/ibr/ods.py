@@ -1370,6 +1370,7 @@ def render_eye(scene: Scene, sources: Sequence[SourceImage], pivot: Sequence[flo
                          inpaint_px=int(round(5 * kw)))
     if checked:
         _brown((source == -1) & rover_px, gray=True)         # the rest of the model nobody colored
+    islands = fill_islands(rgb, source, label, sources) if ISLANDS else {}     # 1.0.6
     gfill = fill_ground(rgb, source, ground) if ground_fill else np.zeros(label.shape, bool)
     sky = fill_sky(rgb, source, label) if sky_fill else np.zeros(label.shape, bool)
     evened = even_sky(rgb, label) if sky_fill else {}
@@ -1379,8 +1380,57 @@ def render_eye(scene: Scene, sources: Sequence[SourceImage], pivot: Sequence[flo
     if checked:                                              # and any surface still without a source
         _brown((source == -1) & ((label == LABEL_MESH) | (label == LABEL_PLANE)))
     return {"brown_filled": brown, "rover": rover_px, "rgb": rgb, "source": source, "label": label, "range": rng, "hidden_fallback": hidden, "filled": filled,
-            "sky_filled": sky, "sky_evened": evened, "sky_healed": healed, "sky_pole": pole, "skyline": skyline, "ground_filled": gfill, "surface_check_rejected": rej, "provenance": prov,
+            "sky_filled": sky, "sky_evened": evened, "sky_healed": healed, "sky_pole": pole, "skyline": skyline, "ground_filled": gfill,
+            "islands": islands, "surface_check_rejected": rej, "provenance": prov,
             "sky_weight": evened.pop("weight", None), "effective_frames": _effective_frames(neff_vals)}
+
+
+# 1.0.6 (Christian, 22 Nov 2026: "the white disc at Van Zyl's rock"): a spot the station's own frames do not see -
+# behind the rover's deck in the one frame that looks there - was colored by a context frame of sol 49, taken 8 m
+# away at another time of day: the spot is sunlit in it and in the rock's shadow in the station's frames, a light disc
+# in a dark ground.  An island of the panorama that only such frames color (context or fill-only), no larger than
+# ISLAND_MAX_DEG2 and ringed by the station's own frames over ISLAND_RING_SHARE of its rim, takes the colors of its
+# rim (pull-push) - a frame of another time would carry other light and shadow into it.
+ISLANDS = True
+ISLAND_MAX_DEG2 = 0.6
+ISLAND_RING_SHARE = 0.75
+
+
+def fill_islands(rgb: np.ndarray, source: np.ndarray, label: np.ndarray, sources: Sequence[Any]) -> Dict[str, int]:
+    """The small islands of context or fill-only colors in the station's own (see ISLANDS), filled from their rim in
+    place; ``source`` -6 there.  Returns {"islands", "px"}."""
+    import cv2
+    from .station_mesh import push_pull
+    H, W = source.shape
+    other = np.array([bool(getattr(s_, "context", False) or getattr(s_, "fill_only", False)) for s_ in sources] + [False])
+    k = np.where(source >= 0, source, len(sources))
+    mine = (source >= 0) & ~other[k]
+    cand = (source >= 0) & other[k] & ((label == LABEL_MESH) | (label == LABEL_PLANE))
+    if not cand.any() or not mine.any():
+        return {"islands": 0, "px": 0}
+    n, lab_, st_, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+    px_per_deg = W / 360.0
+    out = {"islands": 0, "px": 0}
+    for i in range(1, n):
+        x, y, w, h, a = (int(v) for v in st_[i])
+        el = 90.0 - (y + 0.5 * h) / H * 180.0
+        area_deg2 = a / (px_per_deg ** 2) * max(np.cos(np.radians(el)), 0.05)
+        if area_deg2 > ISLAND_MAX_DEG2:
+            continue
+        x0, y0, x1, y1 = max(0, x - 3), max(0, y - 3), min(W, x + w + 3), min(H, y + h + 3)
+        isl = lab_[y0:y1, x0:x1] == i
+        ring = cv2.dilate(isl.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool) & ~isl
+        if not ring.any() or float(mine[y0:y1, x0:x1][ring].mean()) < ISLAND_RING_SHARE:
+            continue
+        blk = rgb[y0:y1, x0:x1].astype(np.float32)
+        have = mine[y0:y1, x0:x1] & ~isl
+        push_pull(blk, have, isl)
+        top = float(np.iinfo(rgb.dtype).max) if np.issubdtype(rgb.dtype, np.integer) else np.inf
+        rgb[y0:y1, x0:x1][isl] = np.clip(blk[isl], 0, top).astype(rgb.dtype)
+        source[y0:y1, x0:x1][isl] = -6
+        out["islands"] += 1
+        out["px"] += int(isl.sum())
+    return out
 
 
 GROUND_BAND_M = 0.25             # mesh this close to the ground plane counts as terrain for the ground fill
@@ -1463,6 +1513,14 @@ SKY_PRELIM_EL_DEG = 10.0         # the first fit (to tell the terrain) takes the
 SKY_TERRAIN_DARK, SKY_TERRAIN_RED = 0.05, 0.05
 SKYLINE_SPECK_MAX_PX = 300       # a speck is at most this many pixels (on an 8k eye); a larger bright patch stays as it is
 SKY_KEEP_MAX_LOG = 0.12
+# 1.0.6 (Christian, 22 Nov 2026, Rockytop in the headset: "the top pole has artifacts in the sky"; Sol0461's panorama
+# has a dark red patch at 50-75 deg, Wildcat Ridge's a violet oval): the frames see the sky only up to about 33 deg
+# there, and the fit - a cubic in elevation with three azimuth harmonics - was evaluated to the zenith, where it is an
+# extrapolation: it ran to black-red and to white.  Above the highest fitted elevation (its SKY_HOLD_PCT percentile)
+# the fit is held at that elevation, and its azimuth terms fade out over SKY_HOLD_FADE_DEG: one color per row up there.
+SKY_HOLD = True
+SKY_HOLD_PCT = 99.0
+SKY_HOLD_FADE_DEG = 15.0
 
 
 def _sky_basis(el: np.ndarray, az: np.ndarray) -> np.ndarray:
@@ -1516,10 +1574,18 @@ def skyline_sky(rgb: np.ndarray, label: np.ndarray, source: Optional[np.ndarray]
             co_, *_ = np.linalg.lstsq(B_[ok_], Y_[ok_], rcond=None)
             res_ = np.abs(Y_ - B_ @ co_).mean(axis=1)
             ok_ = res_ < 4.0 * (float(np.median(res_[ok_])) + 1e-6)
+        if SKY_HOLD:                                             # 1.0.6: where the fit has data (see SKY_HOLD)
+            e_top[id(co_)] = float(np.percentile(elr[fr_], SKY_HOLD_PCT))
         return co_, float(np.sqrt(np.mean(((Y_ - B_ @ co_)[ok_]) ** 2)))
+    e_top: Dict[int, float] = {}
 
     def fit_row(co_, r_):                                        # the fit's log colors along row r_ (W, 3)
         e_, ce_ = float(elr[r_]), float(np.cos(elr[r_]))
+        top_ = e_top.get(id(co_))
+        if top_ is not None and e_ > top_:                       # 1.0.6: held above the data, the azimuth terms fading
+            x_ = min(1.0, (e_ - top_) / np.radians(SKY_HOLD_FADE_DEG))
+            ce_ = float(np.cos(top_)) * (1.0 - x_ * x_ * (3.0 - 2.0 * x_))
+            e_ = top_
         w_ = sum((e_ ** k_) * co_.reshape(SKY_MODEL_EL_DEGREE + 1, nb, -1)[k_] * np.r_[1.0, np.full(nb - 1, ce_)][:, None]
                  for k_ in range(SKY_MODEL_EL_DEGREE + 1))
         return A @ w_
@@ -2331,7 +2397,8 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
                    fill_families: str = "", nadir_mark: bool = True, site_name: Optional[str] = None,
                    nadir_mark_deg: Optional[float] = None, far_field: Optional[bool] = None,
                    context_images: Sequence[str] = (), geometry: bool = True, workers: Optional[int] = None,
-                   station_mesh: Union[bool, str] = False, rover_zcam: bool = False) -> Dict[str, Any]:
+                   station_mesh: Union[bool, str] = False, rover_zcam: bool = False,
+                   rover_part_from: Optional[PathLike] = None) -> Dict[str, Any]:
     """0.99.46: ``rover_zcam`` - the Mastcam-Z frames color the rover too (a run with a dedicated Mastcam-Z deck pan in
     stereo, e.g. Three Forks North's ZCAM05086); else the rover is colored by the Navcam frames alone, in the panorama
     and in the 3D rover (Christian, 19 Nov 2026: "the rover texture should come from the ncam images unless and there
@@ -2688,6 +2755,12 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
                 elif use_masks:
                     part, kind = _sm.terrain_part(scene, sources, station, pool, size=_sm.TEXTURE_PX, target=_sm.TARGET_TRIANGLES, linear=linear,
                                                      rows_per_chunk=rows_per_chunk), "terrain"
+                elif rover_part_from and _sm.copy_part(rover_part_from, out, pf, "rover") is not None:
+                    # 1.0.6: the Navcam run's rover for a Mastcam-Z version (Christian, 22 Nov 2026: "The z34 full 3d
+                    # should use the ncam rover texture")
+                    rec_out["station_mesh"] = json.loads((Path(out) / f"{pf + '_' if pf else ''}{_sm.PART['rover']}.json").read_text(encoding="utf-8"))
+                    scape_done = True
+                    log.info("ods: the rover part copied from %s", rover_part_from)
                 else:
                     part, kind = _sm.rover_part(scene, sources, station, pool, size=_sm.ROVER_TEXTURE_PX, linear=linear,
                                                    rows_per_chunk=rows_per_chunk), "rover"

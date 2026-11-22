@@ -547,6 +547,7 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
     if unknown:
         raise KeyError(f"not in the config: {unknown} (there: {sorted(cfg['stations'])})")
     runs = []
+    navcam_of = {z: n for n, z in (companions or {}).items()}   # 1.0.6: a Mastcam-Z version's Navcam station
     for lab in todo:
         st = cfg["stations"][lab]
         work = block_folder(st, root)
@@ -627,6 +628,11 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
                     argv += ["--eyes", "left", "right", "center"]        # pivot too, for rpp.ibr.rover_surface
                 if step == "ods" and station_mesh:       # 0.99.26: each variant's part of the station mesh
                     argv += ["--station-mesh-only" if station_mesh == "only" else "--station-mesh"]
+                    if v == "rover" and is_zcam_station(st):     # 1.0.6: its rover is the Navcam run's
+                        nav = navcam_of.get(lab) or next((k for k, o in cfg["stations"].items() if k != lab
+                                                          and not is_zcam_station(o) and o.get("station") == st.get("station")), None)
+                        if nav:
+                            argv += ["--rover-part-from", str(Path(out_root) / nav / "with_rover")]
                 cmds.append({"variant": v, "step": step, "argv": argv})
         runs.append({"label": lab, "code": station_code_of(st, lab), "old_label": st.get("old_label"),
                      "work": str(work), "out": str(base), "note": st.get("note", ""), "variants": vs,
