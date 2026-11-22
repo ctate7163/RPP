@@ -20,6 +20,9 @@ The development history before 1.0 is in
   The list stays with the run (a restart at logon keeps it; `--zcam-sites all` ends it).  For the 21 Nov restart of
   freeze 3: Seitah Overlook, Issole / Seitah South and the four other blocks the Sun-distance term brightens by 16 %
   or more (Belva, Rochette, Chal Rocks large, South Arm).
+- Publishing: a station run with no station to publish (its station skipped) rebuilds no entry.  An empty list
+  was read as "every station": the viewer's list got local paths for the 17 stations of the output root and
+  nothing was uploaded (21 Nov 17:14, from a 1.0.0rc1 run).
 - Viewer: full 3D is the default terrain mode (a station opens in it where it has it, until the visitor chooses
   another); the welcome view shows Van Zyl's own pictures, not muted copies, and opens in the original (raw) color.
 - Freeze: the blocks' own mask checkpoint file is passed to every site run (`Run.mask_set`).  A run whose chosen

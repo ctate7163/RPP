@@ -98,3 +98,19 @@ def test_station_frames_keep_their_scale_whatever_the_blocks_16_bit_scale(tmp_pa
         (blk / "processed" / "mppp_config_v1p0.json").write_text(json.dumps({"config": snap}))
         c = L.block_config(SimpleNamespace(root=blk / "colmap", settings={}))["color"]
         assert c["scale_rad_to_int16"] == pytest.approx(2.2e5) and c["scale_int8_to_int16"] == 64, name
+
+
+def test_publish_with_no_station_rebuilds_none(tmp_path):
+    """1.0.1 (21 Nov 2026): an empty station list is "none".  Read as "every station", a run whose station was skipped
+    listed every station of the output root with local paths and uploaded none."""
+    import json
+    from rpp.ibr import web
+    out, w = tmp_path / "out", tmp_path / "web"
+    (out / "Sol0009").mkdir(parents=True)
+    (out / "Sol0009" / f"Sol0009{web.STACK}").write_bytes(b"jpg")
+    w.mkdir()
+    entry = {"id": "Sol0009", "title": "x", "variants": [{"key": "masked", "views": {"standard": "https://hf/Sol0009.jpg"}}]}
+    (w / "panos.json").write_text(json.dumps({"panos": [entry]}))
+    doc = web.publish(out, w, stations=[])
+    got = next(p for p in doc["panos"] if p["id"] == "Sol0009")
+    assert got["variants"][0]["views"]["standard"] == "https://hf/Sol0009.jpg"

@@ -654,7 +654,10 @@ def publish(out_root: PathLike, web_dir: PathLike, stations: Optional[Sequence[s
         raise ValueError(f"views {bad}: one of {list(VIEWS)}")
     n = 0
     for d in sorted(p for p in out_root.iterdir() if p.is_dir() and not p.name.startswith("_")):   # 0.99.3: not _hf_stage
-        if stations and d.name not in stations:
+        # 1.0.1 (21 Nov 2026): an empty list is "none of them".  It was read as "every station": a run whose station was
+        # skipped published every station of the output root with local paths and uploaded none - 17 stations of the
+        # viewer lost their pictures at 17:14 (the page said it could not load Sol0052's files)
+        if stations is not None and d.name not in stations:
             continue
         third = fourth = fifth = sixth = None
         entry: Dict[str, Any] = {"id": d.name, "title": d.name, "variants": [], "mppp": __version__, "rpp": __version__, "author": "Christian Tate",
