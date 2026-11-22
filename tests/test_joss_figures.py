@@ -105,3 +105,23 @@ def test_figure4_from_a_station_folder(tmp_path):
     assert tl[0] > 200 and tl[1] < 80 and br.min() > 200
     info = J.figure4_station("sol0009", {"freeze": tmp_path / "f3root", "root": None}, tmp_path / "f4.png", dpi=60)
     assert (tmp_path / "f4.png").is_file() and info["station"] == lab
+
+
+def test_a_cloud_is_cropped_as_it_is_read_and_a_far_point_makes_no_large_grid(tmp_path):
+    """1.0.3 (make_figures stood still on the JOSS figures): read_cloud crops and thins while it reads; crowded counts
+    on the occupied cells."""
+    import numpy as np
+    from rpp_studies.paper import joss_figures as J
+    d = np.zeros(1000, dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")])
+    d["x"], d["red"] = np.arange(1000), 7
+    f = tmp_path / "fused.ply"
+    f.write_bytes(b"ply\nformat binary_little_endian 1.0\nelement vertex 1000\nproperty float x\nproperty float y\n"
+                  b"property float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n" + d.tobytes())
+    X, C = J.read_cloud(f)
+    assert X.shape == (1000, 3) and tuple(C[0]) == (7, 0, 0)
+    X, _ = J.read_cloud(f, (0, 0), 100.5, max_points=50)
+    assert len(X) <= 50 and X[:, 0].max() <= 100
+    rng = np.random.default_rng(0)
+    P = np.r_[rng.random((20000, 3)) * [10, 10, 1], [[5, 5, 1e7]], [[500, 500, 3]]]
+    k = J.crowded(P)
+    assert k[:-2].mean() > 0.99 and not k[-2:].any()

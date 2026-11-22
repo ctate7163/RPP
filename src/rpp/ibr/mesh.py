@@ -909,6 +909,229 @@ FILL_MIN_COVER = 0.6              # a cell counts as covered when its triangles'
 FILL_ROVER_REF_RADIUS_M = 5.0    # rover_keep_m: the ground's height from the triangles within this of the axis, off the footprint
 
 
+# 1.0.1 (Christian, 21 Nov 2026, on Van Zyl, Rockytop, Skinner Ridge, Wildcat Ridge and Chal Rocks: "a wrong large rounded
+# hill behind the rover", "mesh floaters and spikes" - "How can we prevent these sorts of misshapen mesh artifacts?"):
+# THE FILL MUST NOT CONTRADICT WHAT WAS SEEN.  The dark shapes in the normal maps were the hole fill: a smooth surface
+# over every cell without measured surface, interpolated from the cells around it.  Over a wide hole the cubic rose
+# well above its rim (Van Zyl: 2 m over a 40 deg sector nobody measured); behind an outcrop it climbed the occlusion
+# shadow to the ridge and stood in front of measured terrain (Skinner Ridge: a 20 m "cone"); at the mesh's edge it
+# rose above the skyline the cameras saw (Rockytop, Wildcat Ridge, Chal Rocks: dark "teeth" up to 30 m).  Three upper
+# rules on the fill's node heights, each one that real terrain meets by definition:
+# - THE RIM: the nodes away from measured surface are a harmonic surface over the hole (harmonic_hole_fill), which
+#   cannot rise above its rim (the cubic overshot it; it was clipped only to the whole mesh's highest cell + 0.5 m);
+#   a first try, a cap at the highest covered cell within FILL_RIM_WINDOW_DEG x FILL_RIM_WINDOW_RINGS, made plateaus
+#   (FILL_RIM_BOUND, off);
+# - THE LINE OF SIGHT: seen from the pivot, no higher than the ray to any measured surface farther out on the same
+#   azimuth that the pivot sees (in its 1 deg column, at an elevation no lower than everything nearer) - a surface
+#   there would have hidden it;
+# - THE SKYLINE: no higher than the measured surface's highest elevation on that azimuth (+- FILL_SKY_SMOOTH_BINS;
+#   azimuths whose measured surface stops short of FILL_SKY_REACH of the radius take their neighbors') - above it
+#   the cameras saw sky or the far field.
+FILL_SEEN_RULES = True
+FILL_RIM_BOUND = False           # the rim bound (a plateau per window) - the harmonic fill replaced it
+FILL_RIM_WINDOW_DEG = 25.0
+FILL_RIM_WINDOW_RINGS = 3
+FILL_SIGHT_MARGIN_DEG = 0.2       # the bounds sit this far under the rays ...
+FILL_SIGHT_SLACK_M = 0.05         # ... plus this, so the fill meets measured ground without a step
+FILL_SKY_SMOOTH_BINS = 2
+FILL_SKY_REACH = 0.5             # ... an azimuth's skyline counts when its measured surface reaches this share of the radius
+FILL_VISIBLE_TOL_DEG = 0.05       # a point counts as seen from the pivot when its elevation is within this of the nearer maximum
+
+
+def harmonic_hole_fill(hn: np.ndarray, covered: np.ndarray, edges: np.ndarray, na: int) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """1.0.1: the fill's nodes away from measured surface by harmonic (membrane) interpolation on the polar grid: each
+    such node the weighted mean of its four neighbors (weights 1/dr^2 across rings, 1/(r dtheta)^2 along them), the
+    nodes that touch a covered cell held at their interpolated height.  A harmonic surface lies between the highest
+    and lowest of its boundary (the maximum principle): no dome over a wide hole (Van Zyl), no climb past its rim.
+    The outer ring is free (no condition); a hole touching no covered cell keeps a faint pull to its old height."""
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import spsolve
+    nr1 = len(edges)
+    pad = np.vstack([covered[:1], covered, covered[-1:]])
+    touch = pad[:-1] | pad[1:]
+    touch = touch | np.roll(touch, 1, axis=1)                   # node (i, j) touches cells (i-1, i) x (j-1, j)
+    touch[0, :] = touch[0, :].any()
+    unknown = ~touch
+    unknown[0, :] = False                                        # the axis keeps its one height
+    n_u = int(unknown.sum())
+    if n_u == 0:
+        return hn, {"nodes": 0}
+    idx = -np.ones(hn.shape, np.int64)
+    idx[unknown] = np.arange(n_u)
+    r = np.asarray(edges, float)
+    dth = np.radians(FILL_AZ_STEP_DEG)
+    rows, cols, vals = [], [], []
+    rhs = np.zeros(n_u)
+    diag = np.zeros(n_u)
+    ii, jj = np.nonzero(unknown)
+    k = idx[ii, jj]
+    def link(i2, j2, w):
+        j2 = j2 % na
+        q = idx[i2, j2]
+        diag[k] += w
+        known = q < 0
+        np.add.at(rhs, k[known], w[known] * hn[i2[known], j2[known]])
+        rows.append(k[~known]); cols.append(q[~known]); vals.append(-w[~known])
+    for di in (-1, 1):
+        i2 = ii + di
+        okk = (i2 >= 0) & (i2 < nr1)
+        w = np.where(okk, 1.0 / np.maximum(np.abs(r[np.clip(i2, 0, nr1 - 1)] - r[ii]), 1e-3) ** 2, 0.0)
+        i2c = np.clip(i2, 0, nr1 - 1)
+        w = np.where(i2c == ii, 0.0, w)
+        link(i2c, jj, w)
+    wt = 1.0 / np.maximum(r[ii] * dth, 1e-3) ** 2
+    for dj in (-1, 1):
+        link(ii, jj + dj, wt)
+    eps = 1e-6 * np.maximum(diag, 1e-12)                         # the faint pull (a hole with no rim stays solvable)
+    diag += eps
+    rhs += eps * hn[ii, jj]
+    A = sp.csr_matrix((np.r_[np.concatenate(vals) if vals else [], diag],
+                       (np.r_[np.concatenate(rows) if rows else [], np.arange(n_u)],
+                        np.r_[np.concatenate(cols) if cols else [], np.arange(n_u)])), shape=(n_u, n_u))
+    sol = spsolve(A.tocsc(), rhs)
+    out = hn.copy()
+    out[ii, jj] = sol
+    return out, {"nodes": n_u, "max_change_m": round(float(np.max(np.abs(sol - hn[ii, jj]))), 2)}
+
+
+# 1.0.1: THE MESH CHECKS (mesh_report.json "checks", and a warning in the log for each): the share of the terrain's area
+# ground that the measured surface leaves to fill in each CHECK_SECTOR_DEG sector from CHECK_FROM_M to CHECK_TO_M
+# (over CHECK_FILL_SHARE: no usable depth there - Van Zyl behind the rover; or a ridge hides it); fill above the measured skyline; steep long measured triangles (spikes: steeper than
+# CHECK_SPIKE_STEEP from vertical... |normal . up| < CHECK_SPIKE_COS, CHECK_SPIKE_TALL_M tall, an edge over
+# CHECK_SPIKE_EDGE x the median of the measured triangles at that range).
+CHECK_SECTOR_DEG = 10.0
+CHECK_FROM_M = 8.0
+CHECK_TO_M = 30.0
+CHECK_FILL_SHARE = 0.8
+CHECK_SPIKE_COS = 0.2
+CHECK_SPIKE_TALL_M = 0.5
+CHECK_SPIKE_EDGE = 4.0
+
+
+def mesh_checks(V: np.ndarray, F: np.ndarray, n_measured: int, n_terrain: int, pivot: Sequence[float],
+                up: Sequence[float], north: Optional[Sequence[float]] = None, radius_m: float = DEFAULT_RADIUS_M) -> Dict[str, Any]:
+    """1.0.1: the checks of a station mesh (see CHECK_SECTOR_DEG): ``F[:n_measured]`` the measured terrain,
+    ``F[n_measured:n_terrain]`` its fill.  Azimuths from ``north`` (else from the block's +y)."""
+    P = np.asarray(pivot, float)
+    u = np.asarray(up, float) / np.linalg.norm(up)
+    nn = np.asarray(north if north is not None else (0.0, 1.0, 0.0), float)
+    nn = nn - (nn @ u) * u
+    nn /= np.linalg.norm(nn)
+    ee = np.cross(nn, u)
+    T = np.asarray(V, float)[np.asarray(F[:n_terrain], np.int64)]
+    if not len(T):
+        return {"warnings": []}
+    C = T.mean(1) - P
+    x, y, z = C @ ee, C @ nn, C @ u
+    az = np.degrees(np.arctan2(x, y)) % 360.0
+    rr = np.hypot(x, y)
+    el = np.degrees(np.arctan2(z, rr))
+    area = 0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1)
+    isf = np.arange(len(T)) >= n_measured
+    out: Dict[str, Any] = {"warnings": []}
+    ns = int(round(360.0 / CHECK_SECTOR_DEG))
+    sec = (az // CHECK_SECTOR_DEG).astype(int) % ns
+    far = (rr >= CHECK_FROM_M) & (rr <= min(CHECK_TO_M, radius_m))
+    nz = np.abs(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]) @ u) * 0.5      # the triangles' area seen from above
+    meas = np.bincount(sec[far & ~isf], weights=nz[far & ~isf], minlength=ns)
+    ground = 0.5 * (min(CHECK_TO_M, float(radius_m)) ** 2 - CHECK_FROM_M ** 2) * np.radians(CHECK_SECTOR_DEG)
+    share = np.clip(1.0 - meas / ground, 0.0, 1.0)              # the sector's ground the measured surface leaves to fill
+    out["fill_share_by_sector"] = {f"{int(i * CHECK_SECTOR_DEG)}": round(float(s), 3) for i, s in enumerate(share)}
+    bad = [int(i * CHECK_SECTOR_DEG) for i in np.flatnonzero(share > CHECK_FILL_SHARE)]
+    out["mostly_fill_sectors_deg"] = bad
+    if bad:
+        out["warnings"].append(f"{len(bad)} sector(s) of {CHECK_SECTOR_DEG:g} deg at {CHECK_FROM_M:g}-{CHECK_TO_M:g} m are mostly "
+                               f"fill (no measured surface): azimuth {', '.join(str(b) for b in bad)} deg")
+    b2 = (az // 2).astype(int) % 180
+    mxm = np.full(180, -90.0)
+    np.maximum.at(mxm, b2[~isf], el[~isf])
+    mxf = np.full(180, -90.0)
+    if isf.any():
+        np.maximum.at(mxf, b2[isf], el[isf])
+    reach = np.zeros(180)                                       # only where the measured surface reaches out (a
+    np.maximum.at(reach, b2[~isf], rr[~isf])                     # column it stops short in has no skyline to rise over)
+    above = int(((mxf > mxm + 0.5) & (mxm > -90.0) & (reach >= FILL_SKY_REACH * radius_m)).sum())
+    out["fill_above_skyline_sectors"] = above
+    if above:
+        out["warnings"].append(f"fill rises above the measured skyline in {above} two-degree sector(s)")
+    Tm = T[~isf]
+    if len(Tm):
+        nrm = np.cross(Tm[:, 1] - Tm[:, 0], Tm[:, 2] - Tm[:, 0])
+        nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-12
+        h = Tm @ u
+        tall = h.max(1) - h.min(1)
+        edge = np.linalg.norm(Tm[:, [1, 2, 0]] - Tm, axis=2).max(1)
+        ring = np.minimum((rr[~isf] // 10).astype(int), 20)
+        med = np.zeros(21)
+        for k in np.unique(ring):
+            med[k] = np.median(edge[ring == k])
+        spike = (np.abs(nrm @ u) < CHECK_SPIKE_COS) & (tall > CHECK_SPIKE_TALL_M) & (edge > CHECK_SPIKE_EDGE * med[ring])
+        out["spike_triangles"] = int(spike.sum())
+        if spike.sum():
+            hist = np.bincount(sec[~isf][spike], minlength=ns)
+            out["spike_sectors_deg"] = {f"{int(i * CHECK_SECTOR_DEG)}": int(hist[i]) for i in np.argsort(hist)[::-1][:5] if hist[i]}
+        if spike.sum() >= 100:
+            out["warnings"].append(f"{int(spike.sum())} spike-like triangles (steep, tall, long-edged)")
+    return out
+
+
+def fill_height_bounds(r_m: np.ndarray, az_cell: np.ndarray, h_m: np.ndarray, hp: float, edges: np.ndarray, na: int,
+                       med: np.ndarray, covered: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """1.0.1: the upper bounds of the fill's node heights above the plane (``(len(edges), na)``; see FILL_SEEN_RULES).
+    ``r_m``, ``az_cell``, ``h_m``: the measured triangles' horizontal range, azimuth cell and height above the plane;
+    ``hp``: the pivot's height above the plane; ``med`` / ``covered``: the covered cells' fill heights (rings x na).
+    Returns (bounds, {"rim", "sight", "sky"}: each rule's bound alone, for the report)."""
+    from scipy.ndimage import maximum_filter
+    nr = len(edges) - 1
+    rn = np.asarray(edges, float)[:, None]
+    big = np.full((nr + 1, na), np.inf)
+    # the rim
+    M = np.where(covered, med, -np.inf)
+    wa = max(1, int(round(FILL_RIM_WINDOW_DEG / FILL_AZ_STEP_DEG)))
+    Mx = maximum_filter(M, size=(2 * FILL_RIM_WINDOW_RINGS + 1, 2 * wa + 1), mode=("nearest", "wrap"))
+    pad = np.vstack([Mx[:1], Mx, Mx[-1:]])                      # node (i, j) touches cells (i-1, i) x (j-1, j)
+    node = np.maximum(np.maximum(pad[:-1], pad[1:]), np.roll(np.maximum(pad[:-1], pad[1:]), 1, axis=1))
+    rim = np.where(np.isfinite(node), node, np.inf)
+    if len(r_m) == 0:
+        return rim, {"rim": rim, "sight": big, "sky": big}
+    el = np.arctan2(np.asarray(h_m, float) - hp, np.maximum(np.asarray(r_m, float), 1e-3))
+    mg = np.radians(FILL_SIGHT_MARGIN_DEG)
+    # the skyline
+    sky = np.full(na, -np.inf)
+    np.maximum.at(sky, az_cell, el)
+    reach = np.zeros(na)                                         # an azimuth whose measured surface stops near the
+    np.maximum.at(reach, az_cell, np.asarray(r_m, float))        # rover (Van Zyl's failed frame) says nothing of its
+    have = np.isfinite(sky) & (reach >= FILL_SKY_REACH * float(edges[-1]))   # skyline: its neighbors' is taken
+    if not have.any():
+        have = np.isfinite(sky)
+    jj = np.arange(na)
+    g = jj[have]
+    sky_f = np.interp(jj, np.r_[g - na, g, g + na], np.tile(sky[have], 3))
+    sky_s = np.max(np.stack([np.roll(sky_f, k) for k in range(-FILL_SKY_SMOOTH_BINS, FILL_SKY_SMOOTH_BINS + 1)]), axis=0)
+    node_sky = np.maximum(sky_s, np.roll(sky_s, 1))
+    sky_b = hp + rn * np.tan(np.clip(node_sky - mg, -1.5, 1.5))[None, :] + FILL_SIGHT_SLACK_M
+    # the line of sight
+    order = np.lexsort((r_m, az_cell))
+    a_s, r_s, e_s = np.asarray(az_cell)[order], np.asarray(r_m, float)[order], el[order]
+    st = np.searchsorted(a_s, jj, side="left")
+    en = np.searchsorted(a_s, jj, side="right")
+    cell_b = np.full((nr + 1, na), np.inf)
+    tol = np.radians(FILL_VISIBLE_TOL_DEG)
+    for j in jj[en > st]:
+        rr, ee = r_s[st[j]:en[j]], e_s[st[j]:en[j]]
+        vis = ee >= np.maximum.accumulate(ee) - tol
+        rv, ev = rr[vis], ee[vis]
+        sm = np.minimum.accumulate(ev[::-1])[::-1]              # the lowest seen elevation from here outward
+        k = np.searchsorted(rv, edges, side="right")
+        m = k < len(rv)
+        cell_b[m, j] = sm[k[m]]
+    node_el = np.minimum(cell_b, np.roll(cell_b, 1, axis=1))
+    sight = np.where(np.isfinite(node_el), hp + rn * np.tan(np.clip(node_el - mg, -1.5, 1.5)) + FILL_SIGHT_SLACK_M, np.inf)
+    if not FILL_RIM_BOUND:
+        rim = big
+    return np.minimum(np.minimum(rim, sight), sky_b), {"rim": rim, "sight": sight, "sky": sky_b}
+
+
 def under_rover(X: np.ndarray, pose: Dict[str, Any]) -> np.ndarray:
     """Points over the rover's footprint on the ground (``pose``: :func:`rpp.ibr.rover_deck.rover_pose`)."""
     from .rover_deck import block_to_mech
@@ -1034,6 +1257,17 @@ def fill_terrain(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], up: Seque
     else:
         hn = np.zeros_like(nx)                                   # no terrain at all: the plane
     hn[0, :] = np.mean(hn[0, :])                                 # the axis is one point
+    if FILL_SEEN_RULES and len(F) and ok.any() and covered.sum() >= 3:      # 1.0.1: what was seen bounds the fill
+        hn, hrep = harmonic_hole_fill(hn, covered, edges, na)
+        rep["fill_harmonic"] = hrep
+        hp = float(height_above_plane(P[None, :], plane, up)[0])
+        hi, parts = fill_height_bounds(r[ok], ia, h, hp, edges, na, med, covered)
+        cut = (hn > hi) & (edges[:, None] <= float(radius_m) + 1e-6)     # the apron past the mesh is left as it was
+        drop = np.where(cut, hn - hi, 0.0)
+        rep["fill_bounds"] = {"nodes_lowered": int(cut.sum()), "max_lowered_m": round(float(drop.max()), 2),
+                              "by_rule": {k: int((hn > v + 1e-9).sum()) for k, v in parts.items()}}
+        hn = np.where(cut, hi, hn)
+        hn[0, :] = np.min(hn[0, :])
     if underlay:
         rn = np.broadcast_to(edges[:, None], hn.shape)
         far = np.clip((rn - FILL_UNDERLAY_FROM_M) / max(0.1 * FILL_UNDERLAY_FROM_M, 1e-6), 0.0, 1.0)
@@ -1097,6 +1331,236 @@ def fill_terrain(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], up: Seque
         F = np.vstack([F, Ff + len(V)])
         V = np.vstack([V, Vf])
     return V, F, rep
+
+
+# ------------------------------------------------------------------------------------------- 1.0.4: one sheet
+TIDY = True
+TIDY_UNDER_M = 0.35              # a triangle with another part of the mesh this near straight above it is the lower sheet
+TIDY_UNDER_MIN_M = 0.001         # ... the ray starts this far above the triangle
+TIDY_SAME_PIECE_MIN_M = 0.02     # within one piece (a pocket behind a rock) the sheet above is at least this far
+TIDY_SAME_PIECE = False          # 1.0.4, measured on Van Zyl: dropping the lower sheet within one piece takes the
+#                                  ground under a rock's overhang and opens the fill beneath - left off
+TIDY_WHOLLY = True               # a lower triangle goes only when its three corners are covered too
+TIDY_LEVEL = 0.3                 # only triangles this level (|normal . up|) are a lower sheet: a steep face, whose own
+#                                  bumps stand over it, stays
+TIDY_SLIVER_TO_M = 10.0          # slivers are looked for within this of the mast axis
+TIDY_SLIVER_GRAZE = 0.15         # a sliver: seen this edge-on from the pivot (|normal . view ray|) ...
+TIDY_SLIVER_EDGE = 3.0           # ... with an edge this many times the median edge at its range
+TIDY_SLIVER_ASPECT = 12.0        # or this long for its height, at twice the grazing limit
+TIDY_DROP_FILL = False           # the fill's underlay stays (see tidy_sheets)
+TIDY_FRAGMENT_TRIANGLES = 60     # a piece of fewer triangles (after the steps above) is a flap: dropped
+TIDY_LOOP_EDGES = 80             # a hole with at most this many edges ...
+TIDY_LOOP_DIAMETER_M = 0.30      # ... and this wide (x (1 + range / 10 m)) is closed with a flat fan
+
+
+def _pieces(F: np.ndarray, n_vertices: int) -> np.ndarray:
+    """A label per triangle of the piece it belongs to (triangles sharing a vertex), by scipy - fast on millions."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components as cc
+    F = np.asarray(F, np.int64)
+    i = np.concatenate([F[:, 0], F[:, 1]])
+    j = np.concatenate([F[:, 1], F[:, 2]])
+    _, lab = cc(coo_matrix((np.ones(len(i), np.int8), (i, j)), shape=(n_vertices, n_vertices)), directed=False)
+    _, out = np.unique(lab[F[:, 0]], return_inverse=True)
+    return out.ravel()
+
+
+def _boundary_edges(F: np.ndarray) -> np.ndarray:
+    """The directed edges (k, 2) that belong to one triangle only."""
+    E = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    Es = np.sort(E, axis=1)
+    key = Es[:, 0].astype(np.int64) * (1 << 32) + Es[:, 1]
+    _, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
+    return E[cnt[inv.ravel()] == 1]
+
+
+TIDY_ZIP_M = 0.12                # 1.0.4: a crack between two edges of the measured surface this wide (x range / 4 m beyond
+TIDY_ZIP_TO_M = 20.0             # 4 m) is bridged, within this of the mast axis
+
+
+def zip_cracks(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], up: Sequence[float], width_m: float = TIDY_ZIP_M,
+               to_m: float = TIDY_ZIP_TO_M) -> np.ndarray:
+    """Triangles (k, 3) that bridge the cracks of the surface ``F``: every boundary edge gets a triangle to the
+    nearest boundary vertex of another boundary loop within ``width_m`` (x range / 4 m beyond 4 m).  Van Zyl, the
+    rock at 3.9 m: where the height field hands a steep face to the Poisson patch the two meet edge to edge without
+    shared vertices - a ring of cracks around the face, the fill showing through.  Both rims get their triangles, so
+    the strip is covered twice; they lie in the surface."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components as cc
+    from scipy.spatial import cKDTree
+    B = _boundary_edges(np.asarray(F, np.int64))
+    if not len(B):
+        return np.zeros((0, 3), np.int64)
+    _, loop = cc(coo_matrix((np.ones(len(B), np.int8), (B[:, 0], B[:, 1])), shape=(len(V), len(V))), directed=False)
+    bv = np.unique(B)
+    tree = cKDTree(V[bv])
+    mid = 0.5 * (V[B[:, 0]] + V[B[:, 1]])
+    r = horizontal_distance(mid, np.asarray(pivot, float), up)
+    lim = width_m * np.maximum(1.0, r / 4.0)
+    q = r < to_m
+    d, j = tree.query(mid[q], k=64, distance_upper_bound=float(lim[q].max()) if q.any() else width_m)
+    eb = B[q]
+    out = []
+    ok_any = np.zeros(len(eb), bool)
+    pick = np.zeros(len(eb), np.int64)
+    for k in range(d.shape[1]):
+        good = np.isfinite(d[:, k]) & (d[:, k] < lim[q]) & ~ok_any
+        c = bv[np.where(good, j[:, k], 0)]
+        good &= loop[c] != loop[eb[:, 0]]
+        pick[good] = c[good]
+        ok_any |= good
+    if ok_any.any():
+        out.append(np.stack([eb[ok_any, 1], eb[ok_any, 0], pick[ok_any]], 1))
+    return np.concatenate(out) if out else np.zeros((0, 3), np.int64)
+
+
+def close_small_loops(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], max_edges: int = TIDY_LOOP_EDGES,
+                      max_diameter_m: float = TIDY_LOOP_DIAMETER_M) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Holes of the surface ``F`` that are simple loops of at most ``max_edges`` edges and ``max_diameter_m`` across
+    (x (1 + range / 10 m)) get a fan about their centroid: (V with the centroids added, the new triangles, loops)."""
+    B = _boundary_edges(np.asarray(F, np.int64))
+    if not len(B):
+        return V, np.zeros((0, 3), np.int64), 0
+    out_deg = np.bincount(B[:, 0], minlength=len(V))
+    in_deg = np.bincount(B[:, 1], minlength=len(V))
+    nxt = np.full(len(V), -1, np.int64)
+    nxt[B[:, 0]] = B[:, 1]
+    simple = (out_deg <= 1) & (in_deg <= 1)
+    seen = np.zeros(len(V), bool)
+    P = np.asarray(pivot, float)
+    newV, newF, n = [], [], 0
+    for s in B[:, 0]:
+        if seen[s]:
+            continue
+        loop, v, ok = [], int(s), True
+        while not seen[v]:
+            seen[v] = True
+            loop.append(v)
+            if not simple[v] or nxt[v] < 0:
+                ok = False
+            v = int(nxt[v]) if nxt[v] >= 0 else int(s)
+            if len(loop) > 100000:
+                ok = False
+                break
+        if not ok or v != s or not (3 <= len(loop) <= max_edges):
+            continue
+        X = V[loop]
+        c = X.mean(0)
+        if np.ptp(X, axis=0).max() > max_diameter_m * (1.0 + np.hypot(c[0] - P[0], c[1] - P[1]) / 10.0):
+            continue
+        ci = len(V) + len(newV)
+        newV.append(c)
+        a = np.asarray(loop, np.int64)
+        b = np.roll(a, -1)
+        newF.append(np.stack([b, a, np.full(len(a), ci)], 1))        # the boundary edge a -> b turned: the hole's side
+        n += 1
+    if not n:
+        return V, np.zeros((0, 3), np.int64), 0
+    return np.vstack([V, np.asarray(newV)]), np.concatenate(newF), n
+
+
+def tidy_sheets(V: np.ndarray, F: np.ndarray, n_measured: int, pivot: Sequence[float], up: Sequence[float]
+                ) -> Tuple[np.ndarray, np.ndarray, int, Dict[str, Any]]:
+    """1.0.4 (Christian, 21 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; flaps and slits at rock edges):
+    the terrain as one sheet.  Of ``F`` = the measured triangles [0, ``n_measured``) then the fill:
+
+    1. slivers within ``TIDY_SLIVER_TO_M``: long triangles seen edge-on from the pivot (the surface drawn across a
+       depth edge) are dropped;
+    2. the lower sheet: a measured triangle with another part of the mesh within ``TIDY_UNDER_M`` straight above its
+       centroid is dropped (the zones' overlap, a pocket behind a rock), and a fill triangle wholly under the measured
+       surface (its corners and centroid) too - the fill's rim under the measured edge stays;
+    3. pieces of fewer than ``TIDY_FRAGMENT_TRIANGLES`` triangles are dropped;
+    4. small holes of the measured surface are closed with a flat fan.
+
+    Returns (V, F, the new number of measured triangles, report).  A real overhang's underside goes with 2."""
+    o3d = _o3d()
+    F = np.asarray(F, np.int64)
+    P = np.asarray(pivot, float)
+    u = np.asarray(up, float) / np.linalg.norm(up)
+    nm = int(n_measured)
+    rep: Dict[str, Any] = {"triangles_in": int(len(F)), "measured_in": nm}
+    is_fill = np.arange(len(F)) >= nm
+    keep = np.ones(len(F), bool)
+    cen, nrm, longest = triangle_geometry(V, F)
+    rh = horizontal_distance(cen, P, u)
+    # 1 slivers
+    v = cen - P
+    v /= np.maximum(np.linalg.norm(v, axis=1), 1e-9)[:, None]
+    graze = np.abs((nrm * v).sum(1))
+    T = V[F]
+    e = np.stack([np.linalg.norm(T[:, 1] - T[:, 0], axis=1), np.linalg.norm(T[:, 2] - T[:, 1], axis=1),
+                  np.linalg.norm(T[:, 0] - T[:, 2], axis=1)], 1)
+    area = 0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1)
+    aspect = longest ** 2 / np.maximum(2.0 * area, 1e-12)
+    near = (rh < TIDY_SLIVER_TO_M) & ~is_fill
+    med = np.ones(len(F))
+    if near.any():
+        bins = np.minimum((rh[near] / 0.5).astype(int), int(TIDY_SLIVER_TO_M / 0.5))
+        mb = np.array([np.median(longest[near][bins == b]) if (bins == b).any() else np.inf for b in range(bins.max() + 1)])
+        med[near] = mb[bins]
+    sliver = near & (((graze < TIDY_SLIVER_GRAZE) & (longest > TIDY_SLIVER_EDGE * med))
+                     | ((graze < 2 * TIDY_SLIVER_GRAZE) & (aspect > TIDY_SLIVER_ASPECT) & (longest > 1.5 * med)))
+    keep &= ~sliver
+    rep["slivers"] = int(sliver.sum())
+    # 2 the lower sheet (cast on the mesh without the slivers)
+    def above(Fk, pts):
+        sc = o3d.t.geometry.RaycastingScene()
+        sc.add_triangles(o3d.core.Tensor(np.asarray(V, np.float32)), o3d.core.Tensor(np.asarray(Fk, np.uint32)))
+        rays = np.concatenate([pts + TIDY_UNDER_MIN_M * u, np.broadcast_to(u, pts.shape)], 1).astype(np.float32)
+        ans = sc.cast_rays(o3d.core.Tensor(rays))
+        return ans["t_hit"].numpy() + TIDY_UNDER_MIN_M, ans["primitive_ids"].numpy().astype(np.int64)
+    idx = np.flatnonzero(keep)
+    t, hit = above(F[idx], cen[idx])
+    under = t < TIDY_UNDER_M
+    hit_fill = np.zeros(len(idx), bool)
+    hit_fill[under] = is_fill[idx[hit[under]]]
+    level = np.abs(nrm @ u) > TIDY_LEVEL
+    piece = np.full(len(F), -1, np.int64)
+    piece[idx] = _pieces(F[idx], len(V))
+    other = np.zeros(len(idx), bool)
+    other[under] = piece[idx[hit[under]]] != piece[idx[under]]
+    hit_level = np.zeros(len(idx), bool)
+    hit_level[under] = level[idx[hit[under]]]
+    low_meas = (under & ~is_fill[idx] & ~hit_fill & level[idx] & hit_level     # measured under measured: the lower goes
+                & (other | (TIDY_SAME_PIECE & (t > TIDY_SAME_PIECE_MIN_M))))
+    if TIDY_WHOLLY and low_meas.any():                         # ... when all of it is covered: no crack opens at the
+        li = idx[low_meas]                                     # line where two sheets cross
+        mall = idx[~is_fill[idx]]
+        ok = np.ones(len(li), bool)
+        for k in range(3):
+            tt, hh = above(F[mall], T[li, k])
+            ok &= (tt < TIDY_UNDER_M) & (piece[mall[np.where(tt < TIDY_UNDER_M, hh, 0)]] != piece[li])
+        low_meas[np.flatnonzero(low_meas)[~ok]] = False
+    mi = np.flatnonzero(keep & ~is_fill)
+    fi = np.flatnonzero(keep & is_fill)
+    low_fill = np.zeros(len(fi), bool)
+    if TIDY_DROP_FILL and len(fi) and len(mi):
+        ok = np.ones(len(fi), bool)
+        for pts in (cen[fi], T[fi, 0], T[fi, 1], T[fi, 2]):
+            tt, _ = above(F[mi], pts)
+            ok &= tt < TIDY_UNDER_M
+        low_fill = ok
+    keep[idx[low_meas]] = False
+    keep[fi[low_fill]] = False
+    rep["lower_sheet"] = {"measured": int(low_meas.sum()), "fill": int(low_fill.sum()), "within_m": TIDY_UNDER_M}
+    # 3 fragments of the measured surface
+    mk = np.flatnonzero(keep & ~is_fill)
+    if len(mk):
+        lab = _pieces(F[mk], len(V))
+        cnt = np.bincount(lab)
+        frag = cnt[lab] < TIDY_FRAGMENT_TRIANGLES
+        keep[mk[frag]] = False
+        rep["fragments"] = {"triangles": int(frag.sum()), "pieces": int((cnt < TIDY_FRAGMENT_TRIANGLES).sum())}
+    Fm, Ff = F[keep & ~is_fill], F[keep & is_fill]
+    # 4 small holes closed
+    Fz = zip_cracks(V, Fm, P, u) if TIDY_ZIP_M > 0 else np.zeros((0, 3), np.int64)   # the cracks between two rims
+    rep["cracks_bridged"] = {"triangles": int(len(Fz)), "width_m": TIDY_ZIP_M}
+    V2, Fc, loops = close_small_loops(V, Fm, P)              # (the small holes: of the surface before the bridges)
+    Fm = np.vstack([Fm, Fz]) if len(Fz) else Fm
+    rep["holes_closed"] = {"loops": int(loops), "triangles": int(len(Fc))}
+    Fm = np.vstack([Fm, Fc]) if len(Fc) else Fm
+    rep.update(measured_out=int(len(Fm)), triangles_out=int(len(Fm) + len(Ff)))
+    return V2, np.vstack([Fm, Ff]) if len(Ff) else Fm, int(len(Fm)), rep
 
 
 def build_station_mesh(points: np.ndarray, pivot: Sequence[float], out_dir: PathLike, normals: Optional[np.ndarray] = None,
@@ -1210,7 +1674,26 @@ def build_station_mesh(points: np.ndarray, pivot: Sequence[float], out_dir: Path
                                       rover_keep_m=rover_keep_m, apron_to_m=plane_radius_m if FLAT_EXTENSION else None)
         log.info("mesh: terrain fill - %d of %d cells had no surface (%d triangles); %d triangles under the rover replaced",
                  fill_rep["filled"], fill_rep["cells"], fill_rep["triangles"], fill_rep["under_rover_triangles_removed"])
+        if TIDY and len(F):                                     # 1.0.4: the terrain as one sheet
+            try:
+                V, F, nm_, tidy = tidy_sheets(V, F, int(fill_rep.get("measured_triangles", len(F))), pivot, up)
+                fill_rep["measured_triangles"] = nm_
+                fill_rep["tidy"] = tidy
+                log.info("mesh: one sheet - %d slivers, %d + %d triangles of a lower sheet (measured, fill), %d of "
+                         "small pieces dropped; %d small holes closed", tidy["slivers"], tidy["lower_sheet"]["measured"],
+                         tidy["lower_sheet"]["fill"], (tidy.get("fragments") or {}).get("triangles", 0),
+                         tidy["holes_closed"]["loops"])
+            except Exception as e:                              # noqa: BLE001 - the mesh as it was
+                log.warning("mesh: the one-sheet step failed (%s) - the mesh is left as it was", e)
         terrain_tris = [0, int(fill_rep.get("measured_triangles", len(F)))]
+        try:                                                    # 1.0.1: the mesh checks
+            chk = mesh_checks(V, F, int(fill_rep.get("measured_triangles", len(F))), int(len(F)), pivot, up,
+                              north=(station or {}).get("north_block"), radius_m=radius_m)
+            fill_rep["checks"] = chk
+            for w_ in chk["warnings"]:
+                log.warning("mesh check: %s", w_)
+        except Exception as e:                                  # noqa: BLE001 - a check never stops the mesh
+            log.warning("mesh check failed: %s", e)
     if deck is not None and terrain_only:
         if use_model:
             Vm, Fm = rover_model.model_in_block(deck, parts=rover_model_parts)

@@ -18,7 +18,7 @@ meshed apart from the station products (:mod:`rpp.sfm.fusion_compare`) until a c
 
 Thresholds (working pixels of the maps, up to 2000 px; about 0.6 mrad per pixel for a Navcam frame):
 
-* ``edge_rel`` 0.05: a step of more than 5 % of the depth between neighbouring pixels.  Smooth ground seen from the
+* ``edge_rel`` 0.05: a step of more than 5 % of the depth between neighboring pixels.  Smooth ground seen from the
   2 m mast changes depth by about 0.3 % per pixel at 10 m and 2 % at 75 m (grazing), so the ground is not cut; a rock's
   outline against the ground behind it is a step of tens of percent.  The pixels on both sides of the step are
   dropped, and ``edge_dilate`` more (1 px).
@@ -55,7 +55,7 @@ def camera_rays(width: int, height: int, fx: float, fy: float, cx: float, cy: fl
 
 
 def edge_mask(D: np.ndarray, edge_rel: float) -> np.ndarray:
-    """Pixels with a valid 4-neighbour whose depth differs by more than ``edge_rel`` of the nearer of the two."""
+    """Pixels with a valid 4-neighbor whose depth differs by more than ``edge_rel`` of the nearer of the two."""
     valid = D > 0
     E = np.zeros(D.shape, bool)
     for a, b in (((slice(None), slice(1, None)), (slice(None), slice(None, -1))),
@@ -113,7 +113,7 @@ def filter_workspace(ws: PathLike, out_dir: PathLike, input_type: str = "geometr
     """The filtered depth maps of the dense workspace ``ws`` (``stereo/depth_maps/<image>.<input_type>.bin``) into
     ``out_dir/stereo/depth_maps`` under the same names; the normal maps are linked (hard links, else copied) - the
     fusion ignores a normal where the depth is 0.  ``ws`` is only read.  ``max_range_m``: {camera family letter
-    (N, F, R, Z): metres}.  Returns the record also written to ``out_dir/rpp_depth_filter.json``."""
+    (N, F, R, Z): meters}.  Returns the record also written to ``out_dir/rpp_depth_filter.json``."""
     import pycolmap
     from concurrent.futures import ThreadPoolExecutor
     from .dense import read_colmap_array

@@ -173,7 +173,7 @@ def test_process_images_end_to_end(tmp_path, waypoints):
     assert set(np.unique(arr[..., 3])) <= {0, 65535}
     assert "eXIf" in read_png_chunks(png)
     snap = json.loads((tmp_path / f"mppp_config_{VERSION_TAG}.json").read_text())
-    assert snap["mppp_version_tag"] == VERSION_TAG and snap["config"]["color"]["scale_rad_to_int16"] == 2e5
+    assert snap["mppp_version_tag"] == VERSION_TAG and snap["config"]["color"]["scale_rad_to_int16"] == 1.76e5
     assert (tmp_path / f"mppp_manifest_{VERSION_TAG}.json").is_file()
     refs = (tmp_path / "references.txt").read_text().splitlines()
     assert len(refs) == 3 and refs[1].startswith(NLF.stem + ".png")

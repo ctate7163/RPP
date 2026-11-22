@@ -27,6 +27,7 @@ from .labels import (ZCAM_OPTICS_KEYS, ZCAM_TEMPERATURE_KEY, camera_temperature,
                      label_float, label_get, read_pds, zcam_optics_temperature)
 from .paths import data_dir, resolve_resource
 from .waypoints import lonlat_of, offset_lonlat, waypoint_for_site_drive
+from .waypoints.table import has_station, station_alias
 
 log = logging.getLogger("rpp.process")
 
@@ -273,6 +274,9 @@ class RPPImage:
                                      f"{self.path.name} in the landing frame.{hint}")
                 extra = offset_ned
                 src = f"waypoint site {self.site} drive 0 + label ORIGIN_OFFSET_VECTOR"
+            elif station_alias(self.site, self.drive) and not has_station(waypoints, self.site, self.drive):
+                a = station_alias(self.site, self.drive)    # 1.0.1: the same rover position under another station
+                src = f"waypoint site {a[0]} drive {a[1]} (station alias of site {self.site} drive {self.drive})"
             else:
                 src = f"waypoint site {self.site} drive {self.drive} (exact)"
             p = wp.get("properties", wp)
@@ -301,13 +305,20 @@ class RPPImage:
         self.LTST = first(label_get(L, "LOCAL_TRUE_SOLAR_TIME"))
         self.tau_ref = float(r["tau_reference"])
         self.tau_estimated = self.scale_zenith = self.solar_mu = None
+        self.sun_distance_au = self.scale_sun_distance = None
         if r["apply_tau_correction"]:
             if self.L_s is None or self.solar_el is None:
                 raise ValueError("tau correction needs SOLAR_LONGITUDE and SOLAR_ELEVATION in the label")
             table = resolve_resource(r["tau_table"], data_dir())
             self.tau_estimated = radiometry.interpolate_table(table, self.L_s)
+            if r.get("apply_sun_distance", True):                # 1.0.1: the inverse-square term, from the orbit at L_s
+                from .sun import mars_sun_distance_ls            # (not SPICE: the same on every machine)
+                d_ref = float(r.get("sun_distance_reference_au") or radiometry.SUN_DISTANCE_REFERENCE_AU)
+                self.sun_distance_au = float(mars_sun_distance_ls(self.L_s))
+                self.scale_sun_distance = radiometry.sun_distance_scale(self.sun_distance_au, d_ref)
             self.scale_zenith, self.solar_mu = radiometry.zenith_scale(
-                self.solar_el, self.tau_estimated, self.tau_ref, r["zenith_min"])
+                self.solar_el, self.tau_estimated, self.tau_ref, r["zenith_min"], d_au=self.sun_distance_au,
+                d_ref_au=float(r.get("sun_distance_reference_au") or radiometry.SUN_DISTANCE_REFERENCE_AU))
 
         c = self.config["color"]
         if not c["enhance"]:
@@ -324,6 +335,9 @@ class RPPImage:
             wb = [1.0, 1.0, 1.0]
         self.white_balance = np.asarray(wb, dtype=np.float64)
         self.brightness = float((c.get("brightness_by_family") or {}).get(self.fn.family, 1.0))
+        # 1.0.2: the camera's own factor (Navcam left / right; color.brightness_by_eye), in the same number
+        self.brightness_eye = float((c.get("brightness_by_eye") or {}).get(str(self.fn.camera_group)[:2].upper(), 1.0) or 1.0)
+        self.brightness *= self.brightness_eye
 
     def _radiance_rgb(self, dn: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         L = self.label
@@ -561,8 +575,9 @@ class RPPImage:
             # 0.95.0 (Christian, 27 Oct): the per-image sun facts the paper-3 work needs (rpp.sun)
             **_sun_facts(self.L_s, self.solar_az, self.solar_el, label_get(L, "START_TIME", default="")),
             "tau_estimated": self.tau_estimated, "tau_reference": self.tau_ref,
-            "scale_zenith": self.scale_zenith, "white_balance": self.white_balance.tolist(),
-            "brightness": self.brightness, "lmst_h": self.lmst_h, "saturated_fraction": self.saturated_fraction,
+            "scale_zenith": self.scale_zenith, "scale_sun_distance": self.scale_sun_distance,   # 1.0.1: in scale_zenith
+            "white_balance": self.white_balance.tolist(),
+            "brightness": self.brightness, "brightness_eye": self.brightness_eye, "lmst_h": self.lmst_h, "saturated_fraction": self.saturated_fraction,
             "radiance_scaling_factor": self.scale_dn_to_rad, "radiance_offset": self.offset_dn_to_rad,
             "camera_group": self.fn.camera_group,
             "stereo_partner": self.fn.stereo_partner_stem,

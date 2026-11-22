@@ -52,6 +52,26 @@ def test_tau_table_and_zenith_scale(tmp_path):
     assert zenith_scale(2.0, 0.3, 0.3, 0.2)[1] == 0.2                # floor near the horizon
 
 
+def test_sun_distance_in_the_zenith_scale():
+    """1.0.1: the inverse-square term - (d_ref / d)^2 times the Sun-height and dust terms; perihelion to aphelion 1.45."""
+    from rpp import default_config
+    from rpp.radiometry import SUN_DISTANCE_REFERENCE_AU, sun_distance_scale, zenith_scale
+    from rpp.sun import mars_sun_distance_ls
+    assert sun_distance_scale(SUN_DISTANCE_REFERENCE_AU) == pytest.approx(1.0)
+    assert sun_distance_scale(2 * SUN_DISTANCE_REFERENCE_AU) == pytest.approx(0.25)
+    s0, _ = zenith_scale(30.0, 0.9, 0.3, 0.2)
+    s1, mu = zenith_scale(30.0, 0.9, 0.3, 0.2, d_au=1.381)
+    assert s1 == pytest.approx(s0 * (1.5237 / 1.381) ** 2) and mu == pytest.approx(0.5)
+    peri, aph = mars_sun_distance_ls(251.0), mars_sun_distance_ls(71.0)
+    assert peri == pytest.approx(1.381, abs=0.003) and aph == pytest.approx(1.666, abs=0.003)
+    assert sun_distance_scale(peri) / sun_distance_scale(aph) == pytest.approx(1.455, abs=0.01)
+    r = default_config()["radiometry"]
+    assert r["apply_sun_distance"] is True and r["sun_distance_reference_au"] == pytest.approx(1.5237)
+    c = default_config()["color"]                      # 1.0.1: the scale of every camera x 1.1, no gain of its own
+    assert c["scale_rad_to_int16"] == pytest.approx(1.76e5) and "brightness_gain" not in c
+    assert c["scale_rad_to_int16"] / c["scale_int8_to_int16"] == pytest.approx(2.2e5 / 64)      # the 8-bit level
+
+
 def test_quantize_reserves_zero_for_invalid():
     from rpp import default_config
     from rpp.radiometry import quantize
@@ -62,7 +82,7 @@ def test_quantize_reserves_zero_for_invalid():
     valid = np.array([[True, True], [True, False]])
     i16, i8 = quantize(rad, valid, default_config()["color"])
     assert i16.dtype == np.uint16 and i8.dtype == np.uint8
-    assert i16[0, 0, 0] == 10000 and i8[0, 0, 0] == round(10000 / 64)
+    assert i16[0, 0, 0] == 8800 and i8[0, 0, 0] == round(11000 / 64)           # 1.0.1: 1.76e5 counts per unit, 8-bit as at 2.2e5 / 64
     assert i16[0, 1, 0] == 1 and i8[0, 1, 0] == 1                    # valid never 0
     assert i16[1, 0, 0] == 65535 and i8[1, 0, 0] == 255
     assert not i16[1, 1].any() and not i8[1, 1].any()
@@ -513,3 +533,13 @@ def test_hazcam_white_balance_is_its_own_and_only_hazcam_frames_are_made_again(t
     assert sorted(s[:1] for s in rep["white_balance_changed"]) == ["F", "R"]
     assert not _hazcam_balance_changed(cfg, dict(imgs[1], white_balance=[1.0, 1.211, 1.663]))
     assert not _hazcam_balance_changed(load_config({"color": {"white_balance_hazcam": None}}), imgs[1])
+
+
+def test_navcam_eyes_have_their_own_brightness():
+    """1.0.2: right / left = 0.96 (0.955 on 11 Navcam stereo pairs, about 0.97 elsewhere) - the left eye x 0.980, the
+    right x 1.021, the product 1."""
+    from rpp import default_config, load_config
+    e = default_config()["color"]["brightness_by_eye"]
+    assert e == {"NL": 0.980, "NR": 1.021} and e["NL"] * e["NR"] == pytest.approx(1.0, abs=1e-3)
+    assert (e["NL"] / e["NR"]) == pytest.approx(0.96, abs=2e-3)
+    assert load_config({"color": {"brightness_by_eye": {"NL": 1.0}}})["color"]["brightness_by_eye"]["NL"] == 1.0

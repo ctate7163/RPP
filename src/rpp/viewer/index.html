@@ -65,7 +65,10 @@ if (location.hostname === 'ctate7163.github.io' && (/^\/(RPP|MPPP)\/ods(\/|$)/i.
      name white, in full */
   #title { font-weight: 600; margin-right: 6px; color: #fff; }
   #bar button#home, #compass button#faceO { color: #ff9500; }
-  #bar button#home { display: inline-flex; align-items: center; padding: 3px 7px; }
+  /* 1.0.1 (Christian, 21 Nov 2026: "The home button should be larger, the same size as the N and other buttons. It should
+     be white when you are home and orange when you are somewhere else"): 40 px, as #compass; the color set in show() */
+  #bar button#home { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; }
+  #bar button#home.athome { color: #fff; }
   #VRButton.rpv-big { width: 160px !important; left: calc(50% - 80px) !important; padding: 16px 8px !important;
                       font: bold 18px sans-serif !important; }   /* 0.98.28: larger where VR is supported */
   /* 0.99.1 (Christian, 16 Nov 2026: "make the made by and code text solid black (0.99.39: the code line removed). The Rover Pho Viewer font should
@@ -100,8 +103,11 @@ if (location.hostname === 'ctate7163.github.io' && (/^\/(RPP|MPPP)\/ods(\/|$)/i.
   #nav button#driveBtn { position: absolute; left: 0; bottom: calc(100% + 6px); display: none; }
   /* 0.99.40 (Christian: "The steering wheel icon should have a Beta next to it indicating that it is an experimental
      feature") */
-  #driveBeta { position: absolute; right: calc(100% + 6px); bottom: calc(100% + 18px); display: none; font-size: 11px;
+  /* 1.0.5 (Christian, 22 Nov 2026: "Move the beta icon to the right side of the drive mode button") */
+  #driveBeta { position: absolute; left: calc(100% + 6px); bottom: calc(100% + 18px); display: none; font-size: 11px;
                font-weight: 700; color: #fc6; background: #222c; border: 1px solid #f90; border-radius: 4px; padding: 1px 5px; }
+  /* 1.0.1: a phone's fingers - larger targets for the buttons (the device class: body data-device) */
+  body[data-device="phone"] #nav button, body[data-device="phone"] #compass button, body[data-device="phone"] #home { min-width: 44px; min-height: 44px; }
   #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; z-index: 1;
          font-size: 16px; text-shadow: 0 0 6px #000; }
 </style>
@@ -109,7 +115,7 @@ if (location.hostname === 'ctate7163.github.io' && (/^\/(RPP|MPPP)\/ods(\/|$)/i.
 </head>
 <body>
 <div id="bar">
-  <button id="home" title="welcome view, facing west (H; headset: Y)" aria-label="home"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 9.5V20h5v-6h3v6h5V9.5"/></svg></button>
+  <button id="home" title="welcome view, facing west (H; headset: Y)" aria-label="home"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 9.5V20h5v-6h3v6h5V9.5"/></svg></button>
   <span id="title">Rover Photogrammetry Viewer</span>
   <select id="station" title="station"></select>
   <select id="view" title="color view (space; headset: A)"></select>
@@ -139,6 +145,25 @@ import { VRButton } from './vendor/VRButton.js';
 const $ = id => document.getElementById(id);
 const msg = t => { $('msg').textContent = t || ''; };
 
+// ---------------------------------------------------------------- the kind of device (1.0.1)
+// 1.0.1 (Christian, 21 Nov 2026: "The browser should detect the PC, smartphone or headset and adapt features and welcome
+// instructions accordingly"): 'headset' (a headset's own browser: Quest, Pico, Wolvic, Vision Pro), 'phone' (a touch
+// screen without a mouse: phones and tablets) or 'pc' (a mouse and keys).  ?device=pc|phone|headset overrides it.
+// The welcome view shows that device's controls; a phone gets tilt, pinch zoom and touch driving; a headset the large
+// VR button and the controller list before it enters VR.
+const DEVICE = (() => {
+  const q = new URLSearchParams(location.search).get('device');
+  if (q === 'pc' || q === 'phone' || q === 'headset') return q;
+  const ua = navigator.userAgent || '';
+  if (/OculusBrowser|Quest|Pico|Wolvic|VisionOS|SamsungBrowser VR|Mobile VR/i.test(ua)) return 'headset';
+  const mm = x => !!(window.matchMedia && window.matchMedia(x).matches);
+  const touchOnly = mm('(pointer: coarse)') && !mm('(any-pointer: fine)');
+  const iPadOS = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;     // iPadOS reports itself as a Mac
+  if (touchOnly || iPadOS || /Android|iPhone|iPad|iPod|Mobile/i.test(ua)) return 'phone';
+  return 'pc';
+})();
+document.body.dataset.device = DEVICE;
+
 // ---------------------------------------------------------------- scene: one sphere per eye, the viewer at its center
 const renderer = new THREE.WebGLRenderer({ antialias: true });   // 0.98.14: the rover model's edges (false until then)
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -150,7 +175,8 @@ const vrButton = VRButton.createButton(renderer);
 document.body.appendChild(vrButton);
 // 0.98.28 (Christian, 16 Nov 2026: "make the Enter VR button a little larger if supported")
 if (navigator.xr && navigator.xr.isSessionSupported)
-  navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (ok) vrButton.classList.add('rpv-big'); }).catch(() => {});
+  navigator.xr.isSessionSupported('immersive-vr').then(ok => { if (ok && DEVICE !== 'phone') vrButton.classList.add('rpv-big'); }).catch(() => {});
+// 1.0.1: a phone's browser may offer immersive-vr (a phone viewer) - the button stays, at its own size
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 6000);   // 0.99.32: the fifth mode's sky is 3 km off
@@ -541,10 +567,38 @@ function dropRover() {
 // rover surface of the third mode, colored from the pivot's panorama at its full resolution), drawn in place of the
 // station mesh's own rover part (Christian: "The rover texture in the '3d terrain and rover' looks a lot worse than the
 // 'terrain with rover (3D model)' version")
+// 1.0.6 (Christian, 22 Nov 2026: "it takes too long to load the next site, and the vr screen is black while it
+// switches over. How can we keep the old site until the new one is ready to display? And how can we pre download the
+// next sites 3d assets so they are ready to go earlier?"): the old surfaces stay on until the new ones are made, then
+// the two are swapped in one frame; and the 3D files of the stations before and after this one are fetched in the
+// background once it is up (GLB_CACHE files kept, the oldest dropped)
+const GLB_CACHE = 4;
+const glbCache = new Map();                                      // url -> Promise<ArrayBuffer>
+function fetchGlb(url) {
+  let pr = glbCache.get(url);
+  if (pr) { glbCache.delete(url); glbCache.set(url, pr); return pr; }      // the newest last
+  pr = fetch(url).then(r => { if (!r.ok) throw new Error(`${r.status} ${r.statusText}`); return r.arrayBuffer(); });
+  pr.catch(() => glbCache.delete(url));
+  glbCache.set(url, pr);
+  while (glbCache.size > GLB_CACHE) glbCache.delete(glbCache.keys().next().value);
+  return pr;
+}
+function fileOfStation(q) {                                      // the 3D file the page would open at station q
+  if (!q) return null;
+  const vs = variants(q), here = (variants(panos[cur.s] || {})[cur.v] || {}).key;
+  const v = vs.find(x => x.key === here && x.station_mesh) || vs.find(x => x.key === 'scape3d') || vs.find(x => x.station_mesh);
+  return v && v.station_mesh && v.station_mesh.file ? new URL(v.station_mesh.file, base).href : null;
+}
+function prefetchNeighbors() {
+  if (!panos.length) return;
+  for (const d of [1, -1]) {
+    const u = fileOfStation(panos[(cur.s + d + panos.length) % panos.length]);
+    if (u) fetchGlb(u).catch(e => console.warn('prefetch', u, e));
+  }
+}
 async function showRover(rs, opt = {}) {
   const id = ++roverId;
-  dropRover();
-  if (!rs || !rs.file) return;
+  if (!rs || !rs.file) { dropRover(); return; }
   const made = [];
   try {
     let fadeU = null;
@@ -557,6 +611,7 @@ async function showRover(rs, opt = {}) {
       if (id !== roverId) break;
     }
     if (id !== roverId) { for (const m of made) { m.geometry.dispose(); for (const o of m.userData.textures) o.dispose(); m.material.dispose(); } return; }
+    dropRover();                                                 // 1.0.6: the old station off only now, in the same frame
     roverParts = made;
     for (const m of made) (m.userData.kind === 'rover' ? roverGroup : groundGroup).add(m);
     if (rs.drive && rs.whole) driveStart(rs.drive);              // 0.99.33: the sixth mode
@@ -565,11 +620,14 @@ async function showRover(rs, opt = {}) {
     surfState = { file: rs.file, noHorizon: !!rs.noHorizon, drive: !!(rs.drive && rs.whole), shader: opt.normals ? 'n' : opt.distance ? 'd' : 'c', skin: opt.skin || null };
     if (wholeScene) for (const k in spheres) spheres[k].visible = false;
     anchored = false;
-  } catch (e) { console.warn('rover surface', e); }
+  } catch (e) {
+    console.warn('rover surface', e);
+    if (id === roverId) { for (const m of made) { m.geometry.dispose(); for (const o of m.userData.textures) o.dispose(); m.material.dispose(); } dropRover(); }
+  }
 }
 async function loadSurface(rs, opt) {                            // -> {made: [meshes], fade: the terrain's fade uniform}
   {
-    const buf = await (await fetch(new URL(rs.file, base).href)).arrayBuffer();
+    const buf = await fetchGlb(new URL(rs.file, base).href);          // 1.0.6: perhaps fetched ahead
     const dv = new DataView(buf);
     if (dv.getUint32(0, true) !== 0x46546C67) throw new Error('not a .glb file');
     const n = dv.getUint32(12, true), doc = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, n)));
@@ -668,7 +726,7 @@ const MAP_ORANGE = '#ff9500';     // the orange of the station square on the map
 function textPanel(lines, opt = {}) {                            // lines: [{text, px, weight, color, outline, outlineWidth, spacing}] ; returns a Mesh 1 unit wide
   const pad = 40, W = opt.width || 2048, font = l => `${l.weight || 800} ${l.px}px system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
   const c = document.createElement('canvas'), g = c.getContext('2d');
-  const Hpx = pad * 2 + lines.reduce((a, l) => a + l.px * 1.25, 0);
+  const Hpx = pad * 2 + lines.reduce((a, l) => a + l.px * 1.25 + (l.gap || 0), 0);   // 1.0.1: l.gap - px above a line
   c.width = W; c.height = Math.ceil(Hpx);
   if (opt.back) { g.fillStyle = opt.back; g.beginPath(); g.roundRect(0, 0, c.width, c.height, 48); g.fill(); }
   g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
@@ -684,7 +742,7 @@ function textPanel(lines, opt = {}) {                            // lines: [{tex
   for (const l of lines) {
     const px = one || fit(l);
     g.font = font({ ...l, px }); space(l, px);
-    y += l.px * 0.625;
+    y += (l.gap || 0) + l.px * 0.625;
     if (l.outline) {                                             // 0.99.1: a colored outline (the title); 0.99.40: its width
       g.strokeStyle = l.outline; g.lineWidth = Math.max(3, px * (l.outlineWidth || 0.08)); g.strokeText(l.text, W / 2, y);   // thin: not bold
     } else if (l.plain) {                                        // 0.99.1: solid, no outline (the credit lines)
@@ -725,7 +783,7 @@ const VIEWER_NAME = 'Rover Photogrammetry Viewer (RPV)';
 // 0.99.36 (Christian, 19 Nov 2026: "please put the rpp-rpv viewer version number on the lower left above the site name,
 // images size, and version on which the site was rendered"): the page's own version (the RPP release that wrote it;
 // tests/test_station_mesh.py keeps it equal to rpp.__version__), above the station's line
-const RPV_VERSION = '1.0.0rc1';
+const RPV_VERSION = '1.0.6';
 $('ver').textContent = `RPV viewer ${RPV_VERSION}`;
 const CREDIT = 'Created by Christian Tate at MSSS';   // 0.99.14 (Christian, 17 Nov 2026: 'remove the "for research purposes" phrase')
 // 0.99.39 (Christian, 19 Nov 2026: "remove the code: ... text from the welcome screen"): the credit alone, no link to
@@ -740,6 +798,7 @@ welcome.visible = false;
 world.add(welcome);
 let welcomeBuilt = false;
 let ctlHeadset = null, ctlScreen = null;     // 0.99.37: the welcome view's two sets of controls
+let ctlPhone = null, ctlHeadsetOut = null;  // 1.0.1: a phone's, and a headset's browser before VR
 // 0.99.40 (Christian, 19 Nov 2026: "the North, West, etc. letters in the sky should be 75% their current size and have a
 // solid orange outline and come down a little. put a little more space between the letters so that they don't overlap.
 // Those should also become visible in info mode when I or X or pushed"): 10.5 m wide at 40 m (14 before), 24 deg up
@@ -748,16 +807,22 @@ let ctlHeadset = null, ctlScreen = null;     // 0.99.37: the welcome view's two 
 const skyWords = new THREE.Group();
 skyWords.visible = false;
 world.add(skyWords);
-let skyWordsBuilt = false;
+let skyWordsBuilt = false, westWord = null;
 function updateSkyWords() {
   const on = welcome.visible || infoPanel.visible;
   if (on && !skyWordsBuilt) {
     skyWordsBuilt = true;
-    for (const [name, az] of [['NORTH', 0], ['EAST', 90], ['SOUTH', 180], ['WEST', 270]])
-      skyWords.add(place(textPanel([{ text: name, px: 300, weight: 800, outline: MAP_ORANGE, outlineWidth: 0.14, spacing: 0.12 }],
-                                   { width: 1400 }), az, 24, 40, 10.5));
+    for (const [name, az] of [['NORTH', 0], ['EAST', 90], ['SOUTH', 180], ['WEST', 270]]) {
+      const m = place(textPanel([{ text: name, px: 300, weight: 800, outline: MAP_ORANGE, outlineWidth: 0.14, spacing: 0.12 }],
+                                { width: 1400 }), az, 24, 40, 10.5);
+      if (name === 'WEST') westWord = m;
+      skyWords.add(m);
+    }
   }
   skyWords.visible = on;
+  // 1.0.1 (Christian, 21 Nov 2026: "In the welcome scene, hide the west word in the sky. It should appear again with I
+  // or X, but it is a little distracting if it floats above the text"): WEST with the info page only
+  if (westWord) westWord.visible = infoPanel.visible;
 }
 function showWelcome(on) {
   if (on && !welcomeBuilt) {
@@ -766,20 +831,31 @@ function showWelcome(on) {
     // make west the opening direction'): the title under WEST, which the page opens looking at
     welcome.add(place(textPanel([{ text: VIEWER_NAME, px: 190, weight: 900, color: MARK_BLUE, outline: MAP_ORANGE },
                                  { text: CREDIT, px: 56, weight: 400, color: '#000', plain: true },   // 0.99.1: smaller (80 px), solid black
-                                 { text: 'Mars 2020 Perseverance rover', px: 120, weight: 700 }]), WELCOME_AZ_DEG, 14, 5, 4.2));
+                                 { text: 'Mars 2020 Perseverance rover', px: 120, weight: 700, gap: 60, color: MARK_BLUE, outline: MAP_ORANGE }]), WELCOME_AZ_DEG, 14, 5, 4.2));   // 1.0.1 (Christian, 21 Nov 2026: "Move the Mars 2020.. text down a little and give it the same blue fill and orange outside as the Viewer text")
     ctlHeadset = place(textPanel([{ text: 'trigger: next site   |   left trigger: back   |   stick: turn', px: 84, weight: 600 },
                                  { text: 'X: info and map   |   Y: home   |   A: view', px: 84, weight: 600 },
                                  { text: 'B: stereo / 3D   |   grip: rover on / off   |   hold Y: leave VR', px: 84, weight: 600 },
-                                 { text: 'stick click: drive (beta)   |   driving: sticks forward / back, left / right turn', px: 84, weight: 600 }],
+                                 { text: 'hold B: drive (beta)   |   driving: sticks forward / back, left / right turn', px: 84, weight: 600 }],
                                 { back: 'rgba(0,0,0,0.35)', uniform: true }), WELCOME_AZ_DEG, -6, 5, 3.6);   // 0.99.14: one size
     // 0.99.37 (Christian, 19 Nov 2026: "In the browser 2d version. Show a differ set of controls, including using the
     // space bar to change the color map"): on a screen the keys and the mouse instead
-    ctlScreen = place(textPanel([{ text: '\u2190 \u2192: site   |   space: color map   |   R: rover on / off   |   V: terrain', px: 84, weight: 600 },
+    ctlScreen = place(textPanel([{ text: 'space: color map   |   \u2192: next site   |   \u2190: previous site   |   V: terrain', px: 84, weight: 600 },   // 1.0.3 (Christian, 21 Nov 2026: "put the space bar first, and split the right and left arrows to next site and previous site")
                                  { text: 'drag or W A S D: look   |   wheel: zoom   |   N E S W O: face   |   L: eye', px: 84, weight: 600 },
-                                 { text: 'I: info and map   |   H: home   |   B: stereo / full 3D   |   P: motion on / off', px: 84, weight: 600 },
-                                 { text: 'steering wheel button: drive the rover (beta)   |   driving: the arrow keys', px: 84, weight: 600 }],
+                                 { text: 'I: info and map   |   H: home   |   B: stereo / full 3D   |   R: rover on / off', px: 84, weight: 600 },
+                                 { text: 'P: motion   |   steering wheel button or hold B: drive (beta)   |   driving: arrow keys', px: 84, weight: 600 }],
                                 { back: 'rgba(0,0,0,0.35)', uniform: true }), WELCOME_AZ_DEG, -6, 5, 3.6);
-    welcome.add(ctlHeadset, ctlScreen);
+    // 1.0.1: a phone's controls (touch and tilt), and a headset's browser before it enters VR (the VR button first)
+    ctlPhone = place(textPanel([{ text: 'swipe: look   |   pinch: zoom   |   tilt the phone: move the eye', px: 84, weight: 600 },
+                                { text: '\u203a: next site   |   \u2039: previous site   |   rover button: rover on / off   |   N E S W O: face', px: 84, weight: 600 },
+                                { text: 'the lists at the top: station, color map, stereo / full 3D', px: 84, weight: 600 },
+                                { text: 'steering wheel button: drive (beta)   |   driving: drag up / down, left / right', px: 84, weight: 600 }],
+                               { back: 'rgba(0,0,0,0.35)', uniform: true }), WELCOME_AZ_DEG, -6, 5, 3.6);
+    ctlHeadsetOut = place(textPanel([{ text: 'press the VR button at the bottom to step into the station', px: 84, weight: 700, color: MARK_BLUE },
+                                     { text: 'in VR: trigger: next site   |   left trigger: back   |   stick: turn', px: 84, weight: 600 },
+                                     { text: 'X: info and map   |   Y: home   |   A: view   |   B: stereo / 3D', px: 84, weight: 600 },
+                                     { text: 'grip: rover on / off   |   hold B: drive (beta)   |   hold Y: leave VR', px: 84, weight: 600 }],
+                                    { back: 'rgba(0,0,0,0.35)', uniform: true }), WELCOME_AZ_DEG, -6, 5, 3.6);
+    welcome.add(ctlHeadset, ctlScreen, ctlPhone, ctlHeadsetOut);
   }
   welcome.visible = !!on;
   updateSkyWords();
@@ -787,9 +863,11 @@ function showWelcome(on) {
   $('credit').style.display = on ? '' : 'none';
 }
 function controlsFor() {                          // 0.99.37: the welcome view's controls - the headset's in a session
-  const xr = renderer.xr.isPresenting;
+  const xr = renderer.xr.isPresenting;                           // 1.0.1: on a screen, the device's own set
   if (ctlHeadset) ctlHeadset.visible = xr;
-  if (ctlScreen) ctlScreen.visible = !xr;
+  if (ctlScreen) ctlScreen.visible = !xr && DEVICE === 'pc';
+  if (ctlPhone) ctlPhone.visible = !xr && DEVICE === 'phone';
+  if (ctlHeadsetOut) ctlHeadsetOut.visible = !xr && DEVICE === 'headset';
 }
 renderer.xr.addEventListener('sessionstart', controlsFor);
 renderer.xr.addEventListener('sessionend', controlsFor);
@@ -966,12 +1044,19 @@ const MODE_OF = { masked: 'stereo', rover: 'stereo', rover3d: 'stereo', terrain3
 const MODE_KEYS = { full: ['scape3d', 'terrain3d'], drive: ['drive3d'] };
 const MODE_FALLBACK = { drive: 'full', full: 'stereo' };   // where a station lacks the mode
 let mode = 'stereo';
+// 1.0.1 (Christian, 21 Nov 2026: "Make full 3D default"): the terrain mode asked for - full 3D until the visitor
+// chooses another (the menu, V, B, a link).  A station opens in it where it has it (pick falls back to the local 3D,
+// then stereo); the welcome view, a panorama, does not change it
+let want = 'full';
 const modeKeys = m => m === 'stereo' ? (roverOn ? ['rover', 'rover3d'] : ['masked']) : MODE_KEYS[m] || [];
 function modesOf(p) {                            // the terrain modes this station has
   const ks = variants(p).map(q => q.key);
   return TERRAIN_MODES.filter(([m]) => m === 'stereo' ? ks.some(k => MODE_OF[k] === 'stereo') : MODE_KEYS[m].some(k => ks.includes(k)));
 }
 const viewName = () => views(panos[cur.s] || {}, cur.v)[cur.w];
+// 1.0.1: the view a change of station keeps - not the welcome view's (it opens in the original color; a station in standard)
+const HOME_VIEW = 'raw color';                   // 1.0.1: the welcome view opens in Van Zyl's original color
+const leaveName = () => (panos[cur.s] || {}).welcome ? 'standard' : viewName();
 function pick(p, m, wname) {                     // cur.v and cur.w for terrain mode m and roverOn; the view kept by its name
   const vs = variants(p);
   let j = -1;
@@ -1134,12 +1219,14 @@ async function show() {
     }
     roverFrontAz = roverForward(p);
     showWelcome(!!p.welcome);
+    $('home').classList.toggle('athome', !!p.welcome);
     if (faceAfterLoad) { faceAz(faceAfterLoad); faceAfterLoad = null; }
     if (infoPanel.visible) drawInfo();
     noteParts = [p.title || p.id, p.note, modeLabel(), whole ? `${(vr.station_mesh.triangles || 0).toLocaleString()} triangles` : size,
                  (p.rpp || p.mppp) ? `rendered with RPP ${p.rpp || p.mppp}` : ''];
     setNote();
     msg('');
+    prefetchNeighbors();                                         // 1.0.6: the next and previous stations' 3D files
   } catch (e) { if (id === loadId) msg(`could not load ${url}: ${e.message || e}`); }
 }
 
@@ -1151,10 +1238,11 @@ function step(what, d) {
     for (let i = 1; i <= names.length; i++) { const j = (cur.w + i) % names.length; if (color(names[j])) { cur.w = j; break; } }
     show(); return;
   }
-  if (what === 's') { const wn = viewName(); cur.s = (cur.s + d + panos.length) % panos.length; pick(panos[cur.s], mode, wn); }   // 0.99.40: the terrain mode and the rover kept
+  if (what === 's') { const wn = leaveName(); cur.s = (cur.s + d + panos.length) % panos.length; pick(panos[cur.s], mode === 'drive' ? 'drive' : want, wn); }   // 0.99.40: the terrain mode and the rover kept
   if (what === 'v') {                                            // 0.99.40: the next terrain mode (V; headset: right grip)
     const ms = modesOf(p).map(x => x[0]), i = ms.indexOf(mode === 'drive' ? 'full' : mode);
-    pick(p, ms[(i + d + ms.length) % Math.max(ms.length, 1)] || 'stereo', viewName());
+    want = ms[(i + d + ms.length) % Math.max(ms.length, 1)] || 'stereo';
+    pick(p, want, viewName());
   }
   if (what === 'w') cur.w = (cur.w + d + views(p, cur.v).length) % Math.max(views(p, cur.v).length, 1);
   show();
@@ -1177,7 +1265,8 @@ function faceAz(azDeg) {                         // on a screen: look there, lev
 }
 function goHome() {
   const i = panos.findIndex(q => q.welcome);
-  cur.s = i < 0 ? 0 : i; cur.v = 0; cur.w = 0; mode = 'stereo';
+  cur.s = i < 0 ? 0 : i;
+  pick(panos[cur.s] || {}, want, HOME_VIEW);     // 1.0.1: Van Zyl in the terrain mode asked for, the original color
   faceAfterLoad = 270;                           // west
   show();
 }
@@ -1189,6 +1278,7 @@ function stereoOrFull() {                        // 1.0 (Christian, 20 Nov 2026:
   const p = panos[cur.s] || {};                  // between the stereo and full 3d models. Every time it switches, go to
   const ms = modesOf(p).map(x => x[0]);          // the standard color"): headset B and the B key
   const to = mode === 'stereo' ? (ms.includes('full') ? 'full' : 'stereo') : 'stereo';
+  want = to;
   pick(p, to, 'standard');
   show();
 }
@@ -1231,7 +1321,7 @@ $('nextSt').onclick = () => step('s', 1);
 $('roverBtn').onclick = roverToggle;
 $('driveBtn').onclick = driveToggle;
 
-function fromHash() {
+function fromHash(first) {
   const [sid, vkey, wkey, rk] = decodeURIComponent(location.hash.slice(1)).split('/');
   let s = panos.findIndex(p => p.id === sid);
   if (s < 0 && sid) {                                              // 1.0: a link of 0.99 (Sol0052_S003D2046) to Sol0052
@@ -1241,17 +1331,18 @@ function fromHash() {
   if (s < 0) return;
   cur.s = s;
   const v = variants(panos[s]).findIndex(q => q.key === vkey);
-  cur.v = v < 0 ? 0 : v;
+  if (v < 0) pick(panos[s], want, wkey); else cur.v = v;          // 1.0.1: a link without a terrain mode opens in `want`
   const key = (variants(panos[s])[cur.v] || {}).key;              // 0.99.40: the terrain mode and the rover of the link
   mode = MODE_OF[key] || 'stereo';
+  if (first && v >= 0 && MODE_OF[key] && mode !== 'drive') want = mode;   // the mode a link names, when the page opens
   roverOn = mode === 'stereo' ? key !== 'masked' : rk !== 'no-rover';
   const w = views(panos[s], cur.v).findIndex(k => k === wkey || viewLabel(k) === wkey);
   cur.w = w < 0 ? 0 : w;
 }
 
 const blurAfter = e => { if (e && e.target && e.target.blur) e.target.blur(); };   // 0.99.37: the keys back to the page
-$('station').onchange = e => { cur.s = +e.target.value; show(); blurAfter(e); };
-$('variant').onchange = e => { pick(panos[cur.s] || {}, e.target.value, viewName()); show(); blurAfter(e); };   // 0.99.40: a terrain mode
+$('station').onchange = e => { const wn = leaveName(); cur.s = +e.target.value; pick(panos[cur.s] || {}, want, wn); show(); blurAfter(e); };
+$('variant').onchange = e => { want = e.target.value; pick(panos[cur.s] || {}, want, viewName()); show(); blurAfter(e); };   // 0.99.40: a terrain mode
 $('view').onchange = e => { cur.w = +e.target.value; show(); blurAfter(e); };
 $('eye').onchange = e => { setEye(e.target.value); blurAfter(e); };
 window.addEventListener('hashchange', () => { fromHash(); show(); });
@@ -1274,7 +1365,26 @@ window.addEventListener('keydown', e => {
   else if (e.key === 'p' || e.key === 'P') { motionOn = !motionOn; }     // 0.99.32: the screen's eye movement on / off
   else if (e.key === 'i' || e.key === 'I') toggleInfo();
   else if (e.key === 'h' || e.key === 'H') goHome();                     // 0.98.28: as the headset's Y
-  else if (e.key === 'b' || e.key === 'B') stereoOrFull();               // 0.98.28: as the headset's B (0.99.41: stereo / full 3D)
+  else if (e.key === 'b' || e.key === 'B') {                             // 0.98.28: as the headset's B (0.99.41: stereo / full 3D)
+    // 1.0.5 (Christian, 22 Nov 2026: "Enter it by holding B"): B held for HOLD_B_MS starts the drive where the station
+    // has it (or ends it); a short press is stereo / full 3D, done when the key comes up
+    if (!e.repeat && !bKey) bKey = { timer: setTimeout(() => { bKey.done = true; driveByHold(); }, HOLD_B_MS), done: false };
+  }
+});
+const HOLD_B_MS = 700;
+let bKey = null;
+function driveByHold() {
+  if (mode === 'drive' || variants(panos[cur.s] || {}).some(q => q.key === 'drive3d')) driveToggle();
+}
+window.addEventListener('keyup', e => {
+  if ((e.key === 'b' || e.key === 'B') && bKey) {
+    clearTimeout(bKey.timer);
+    if (!bKey.done) stereoOrFull();
+    bKey = null;
+  }
+});
+window.addEventListener('blur', () => {         // the page lost the keyboard with B down: no keyup will come
+  if (bKey) { clearTimeout(bKey.timer); bKey = null; }
 });
 
 // ---------------------------------------------------------------- looking around on a screen
@@ -1302,13 +1412,50 @@ window.addEventListener('pointermove', e => {
   if (e.buttons || Math.abs(e.movementX) + Math.abs(e.movementY) > 2) touched();
 }, { passive: true });
 document.documentElement.addEventListener('mouseleave', () => hover.set(0, 0));
+// 1.0.1 (Christian, 21 Nov 2026: "Rpv smartphone viewer should use the phone tilt to change the pivot"): on a phone the
+// tilt moves the eye about the pivot, as the mouse does on a PC - TILT_FULL_DEG of tilt from how the phone is held
+// moves it TILT_M along the screen's right or up; how it is held is followed slowly (TILT_RECENTER_S), so a new grip
+// becomes the middle again.  ?tilt=-1 turns the direction round, ?tilt=0 (or ?still=1, or P) turns it off.  iOS asks
+// for leave to read the tilt at the first touch.
+const TILT_M = 0.08, TILT_FULL_DEG = 15, TILT_RECENTER_S = 6;
+const tiltSign = (() => { const v = new URLSearchParams(location.search).get('tilt'); return v == null ? 1 : Number(v) || 0; })();
+let eyeReach = HOVER_M;
+const tilt = { base: null, t: 0, on: false };
+function onTilt(e) {
+  if (e.beta == null || e.gamma == null || !tiltSign) return;
+  const ang = ((screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0) % 360;
+  // the tilt about the screen's up axis (x: the eye right) and about its right axis (y: the eye up), by the screen's turn
+  let x = e.gamma, y = -e.beta;
+  if (ang === 90) { x = e.beta; y = e.gamma; }
+  else if (ang === 270 || ang === -90) { x = -e.beta; y = -e.gamma; }
+  else if (ang === 180 || ang === -180) { x = -e.gamma; y = e.beta; }
+  const now = performance.now() / 1000;
+  if (!tilt.base) tilt.base = { x, y };
+  const k = 1 - Math.exp(-Math.min(1, now - tilt.t) / TILT_RECENTER_S);
+  tilt.t = now;
+  tilt.base.x += k * (x - tilt.base.x); tilt.base.y += k * (y - tilt.base.y);
+  const c = v => Math.max(-1, Math.min(1, v / TILT_FULL_DEG));
+  hover.set(tiltSign * c(x - tilt.base.x), tiltSign * c(y - tilt.base.y));
+}
+function startTilt() {
+  if (tilt.on || DEVICE !== 'phone' || !tiltSign || typeof DeviceOrientationEvent === 'undefined') return;
+  const go = () => { tilt.on = true; window.addEventListener('deviceorientation', onTilt, { passive: true }); };
+  if (typeof DeviceOrientationEvent.requestPermission === 'function')       // iOS 13+: only from a touch
+    DeviceOrientationEvent.requestPermission().then(r => { if (r === 'granted') go(); }).catch(() => {});
+  else go();
+}
+if (DEVICE === 'phone') {
+  eyeReach = TILT_M;
+  if (typeof DeviceOrientationEvent === 'undefined' || typeof DeviceOrientationEvent.requestPermission !== 'function') startTilt();
+  window.addEventListener('touchend', startTilt, { passive: true });         // iOS: the first touch asks
+}
 function screenEye3(dt) {                                        // -> eyeMove: the eye's place about the turning point (m)
   eyeMove.set(0, 0, 0);
   if (!motionOn || !roverParts.length) return eyeMove;
   camera.matrixWorld.extractBasis(eyeRight, eyeUp, eyeFwd);       // the camera's x, y and z (it looks along -z)
   const k = 1 - Math.exp(-dt / 0.25);
   hoverNow.lerp(hover, k);
-  const sx = HOVER_M * hoverNow.x, sy = HOVER_M * hoverNow.y;
+  const sx = eyeReach * hoverNow.x, sy = eyeReach * hoverNow.y;
   return eyeMove.addScaledVector(eyeFwd, -NECK_M).addScaledVector(eyeRight, sx).addScaledVector(eyeUp, sy);
 }
 function look() {
@@ -1317,9 +1464,43 @@ function look() {
 }
 const el = renderer.domElement;
 el.style.touchAction = 'none';
-el.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; el.setPointerCapture(e.pointerId); });
-el.addEventListener('pointerup', () => { drag = null; });
+// 1.0.1: touch - two fingers pinch the zoom; while driving, one finger drags the rover (up / down: forward / back, left /
+// right: turn, from where it touched, DRIVE_TOUCH_PX for full speed) instead of turning the view
+const touches = new Map();
+let pinch = null;
+const driveTouch = { f: 0, t: 0, from: null };
+const DRIVE_TOUCH_PX = 90;
+const pinchSpan = () => { const [a, b] = [...touches.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
+el.addEventListener('pointerdown', e => {
+  drag = { x: e.clientX, y: e.clientY }; el.setPointerCapture(e.pointerId);
+  if (e.pointerType === 'touch') {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touches.size === 2) { pinch = { d: pinchSpan(), fov: camera.fov }; drag = null; driveTouch.from = null; }
+    else if (DRIVE.on && touches.size === 1) { driveTouch.from = { x: e.clientX, y: e.clientY, id: e.pointerId }; drag = null; }
+  }
+});
+const touchEnd = e => {
+  drag = null;
+  touches.delete(e.pointerId);
+  if (touches.size < 2) pinch = null;
+  if (driveTouch.from && driveTouch.from.id === e.pointerId) { driveTouch.from = null; driveTouch.f = driveTouch.t = 0; }
+};
+el.addEventListener('pointerup', touchEnd);
+el.addEventListener('pointercancel', touchEnd);
 el.addEventListener('pointermove', e => {
+  if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && touches.size >= 2) {
+      camera.fov = Math.max(15, Math.min(100, pinch.fov * pinch.d / Math.max(1, pinchSpan())));
+      camera.updateProjectionMatrix();
+      return;
+    }
+    if (driveTouch.from && driveTouch.from.id === e.pointerId) {
+      const c = v => Math.max(-1, Math.min(1, v / DRIVE_TOUCH_PX));
+      driveTouch.f = c(driveTouch.from.y - e.clientY); driveTouch.t = c(driveTouch.from.x - e.clientX);
+      return;
+    }
+  }
   if (!drag || renderer.xr.isPresenting) return;
   const k = THREE.MathUtils.degToRad(camera.fov) / window.innerHeight;
   yaw -= (e.clientX - drag.x) * k; pitch += (e.clientY - drag.y) * k;
@@ -1389,7 +1570,7 @@ function pressed(src, i) {                       // button i of this controller 
   held.set(key, is);
   return is && !was;
 }
-let stickL = 0, stickR = 0, stickTurn = 0, yDown = 0, yDone = false;
+let stickL = 0, stickR = 0, stickTurn = 0, yDown = 0, yDone = false, bDown = 0, bDone = false;
 function buttons(dt) {                           // xr-standard: button 4 is A (right) / X (left), button 5 is B (right) / Y (left)
   const session = renderer.xr.getSession();
   if (!session) return;
@@ -1405,12 +1586,16 @@ function buttons(dt) {                           // xr-standard: button 4 is A (
       if (down && !yDown) { yDown = now; yDone = false; }
       if (down && !yDone && now - yDown > 1000) { yDone = true; session.end(); return; }
       if (!down && yDown) { if (!yDone) goHome(); yDown = 0; }
-    } else if (pressed(src, 5)) stereoOrFull();
-    if (false) { if (left) goHome(); else stereoOrFull(); }         // 0.98.28: Y (left): home, facing west; B (right): 0.99.41 stereo / full 3D
+    } else {                                                     // 1.0.5: B held - the drive; a short press: stereo / full 3D
+      const down = !!(gp.buttons[5] && gp.buttons[5].pressed), now = performance.now();
+      if (down && !bDown) { bDown = now; bDone = false; }
+      if (down && !bDone && now - bDown > HOLD_B_MS) { bDone = true; driveByHold(); }
+      if (!down && bDown) { if (!bDone) stereoOrFull(); bDown = 0; }
+    }
     // 0.99.40 (Christian, 19 Nov 2026: "In VR mode, enter driving/ steering mode with a click on the joystick. Left and
     // right still rotate the view and forward and back on the left and right controler works in like skid steering"):
     // a thumbstick click (xr-standard button 3) starts the drive where the station has it, and ends it
-    if (pressed(src, 3) && (mode === 'drive' || variants(panos[cur.s] || {}).some(q => q.key === 'drive3d'))) driveToggle();
+    // 1.0.5 (Christian, 22 Nov 2026: "Enter it by holding B"): the stick's click no longer starts or ends the drive
     if (DRIVE.on) {                                              // 0.99.33: a stick's forward / back axis is its side's track
       const y = -(gp.axes.length >= 4 ? gp.axes[3] : (gp.axes[1] || 0));
       const t = Math.abs(y) > STICK_DEAD ? Math.sign(y) * (Math.abs(y) - STICK_DEAD) / (1 - STICK_DEAD) : 0;
@@ -1480,7 +1665,8 @@ renderer.setAnimationLoop(() => {
     world.position.copy(camera.position); fixed.position.set(0, 0, 0);
     if (meshFade) meshFade.copy(fadeBase);
     if (DRIVE.on) {                                              // the arrow keys: up / down both tracks, left / right one against the other
-      const f = (driveKeys.has('ArrowUp') ? 1 : 0) - (driveKeys.has('ArrowDown') ? 1 : 0), t = (driveKeys.has('ArrowLeft') ? 1 : 0) - (driveKeys.has('ArrowRight') ? 1 : 0);
+      const f = Math.max(-1, Math.min(1, (driveKeys.has('ArrowUp') ? 1 : 0) - (driveKeys.has('ArrowDown') ? 1 : 0) + driveTouch.f)),
+            t = Math.max(-1, Math.min(1, (driveKeys.has('ArrowLeft') ? 1 : 0) - (driveKeys.has('ArrowRight') ? 1 : 0) + driveTouch.t));   // 1.0.1: + a finger
       driveStep(dt, Math.max(-1, Math.min(1, f - 0.5 * t)), Math.max(-1, Math.min(1, f + 0.5 * t)));
     }
   }
@@ -1516,6 +1702,13 @@ diagnostics();
   try {
     const j = await (await fetch(index, { cache: 'no-cache' })).json();
     panos = j.panos || j;
+    // 1.0.5 (Christian, 22 Nov 2026: "From the viewer, let's remove or hide all sites that don't have full-3d models"):
+    // a station without the full 3D model is left out of the page; the list keeps it, and it shows again once its
+    // model is made and uploaded.  ?all=1 shows every station of the list
+    if (new URLSearchParams(location.search).get('all') !== '1') {
+      const with3d = panos.filter(p => p.welcome || variants(p).some(q => q.key === 'scape3d'));
+      if (with3d.some(p => !p.welcome)) panos = with3d;
+    }
     traverse = j.traverse || null;
     if (traverse && traverse.ortho && traverse.ortho.file)       // the map's orbital picture: small, fetched once
       fetch(new URL(traverse.ortho.file, base).href).then(r => r.blob()).then(createImageBitmap)
@@ -1528,7 +1721,8 @@ diagnostics();
     if (j.title && !/stereo panoramas|panorama viewer|photogrammetry viewer/i.test(j.title)) { $('title').textContent = j.title; document.title = j.title; }
   } catch (e) { msg(`no image list at ${index.href} (${e.message || e})`); return; }
   if (!panos.length) { msg('the image list is empty'); return; }
-  fromHash();
+  fromHash(true);
+  if (!decodeURIComponent(location.hash.slice(1)).split('/')[0] && (panos[cur.s] || {}).welcome) pick(panos[cur.s], want, HOME_VIEW);
   look();
   show();
 })();

@@ -47,7 +47,7 @@ def test_terrain_texture_is_seen_from_above_the_pivot_and_hidden_faces_get_cells
     src = O.station_sources(proj, rec, st, scale=1.0)
     tp = SM.terrain_part(sc, src, st, size=1024, target=8000)
     r = tp["record"]
-    assert r["triangles"] <= 8000 and r["center_above_pivot_m"] == 0.5 and 70 < r["theta_max_deg"] < 85
+    assert r["triangles"] <= 8000 and r["center_above_pivot_m"] == 0.0 and 70 < r["theta_max_deg"] < 88
     assert r["triangles_in_cells"] > 10 and r["hidden_from_center"] > 10 and r["disc_texels_colored"] > 0.6
     uv = tp["uv"]
     assert uv.min() >= 0 and uv.max() <= 1 and len(tp["V"]) == len(uv) and tp["F"].max() == len(uv) - 1
@@ -276,7 +276,7 @@ def test_viewer_terrain_modes_rover_button_and_hidden_drive():
               "} else if (Math.abs(x) > STICK_DEAD) {", "$('driveBtn').onclick = driveToggle;",
               "if (isWhole(vr)) return null;", "if (!whole) {", "rk !== 'no-rover'", "roverOn = false, roverId = 0",
               "c.addEventListener('squeezestart', () => roverToggle());", "session.end(); return;",
-              "grip: rover on / off   |   hold Y: leave VR", 'id="driveBeta"', "if (pressed(src, 3) &&",
+              "grip: rover on / off   |   hold Y: leave VR", 'id="driveBeta"', "if (down && !bDone && now - bDown > HOLD_B_MS) { bDone = true; driveByHold(); }",
               "outlineWidth: 0.14, spacing: 0.12", "az, 24, 40, 10.5", "const on = welcome.visible || infoPanel.visible;",
               "#title { font-weight: 600; margin-right: 6px; color: #fff; }", "#bar button#home, #compass button#faceO { color: #ff9500; }",
               "const MAP_ORANGE = '#ff9500';", "#nav button#roverBtn { color: #ff9500; }", "#nav button#roverBtn.on { color: #fff; border-color: #555; }",
@@ -287,8 +287,17 @@ def test_viewer_terrain_modes_rover_button_and_hidden_drive():
     nav = page[page.index('<div id="nav">'):page.index('<div id="msg">')]
     assert nav.index('id="driveBtn"') < nav.index('id="roverBtn"') and "#nav button#driveBtn { position: absolute;" in page
     assert "lastRoverKey" not in page and "grip: rover on, off, 3D, 3D terrain" not in page
-    drive = page[page.index("if (pressed(src, 3) &&"):page.index("const x = gp.axes.length >= 4")]
+    drive = page[page.index("if (DRIVE.on) {                                              // 0.99.33"):page.index("const x = gp.axes.length >= 4")]
     assert "continue;" not in drive                               # in the drive the sticks still turn the view
+    # 1.0.5 (Christian, 22 Nov 2026: "Move the beta icon to the right side of the drive mode button. Enter it by
+    # holding B"): the label right of the wheel; B held starts the drive (keys and the right controller), a short
+    # press is still stereo / full 3D; the stick's click no longer starts it
+    assert "#driveBeta { position: absolute; left: calc(100% + 6px);" in page and "pressed(src, 3)" not in page
+    assert "if (!bKey.done) stereoOrFull();" in page and "if (!down && bDown) { if (!bDone) stereoOrFull(); bDown = 0; }" in page
+    assert "hold B: drive (beta)" in page and "stick click: drive" not in page
+    # Christian, 22 Nov 2026: "From the viewer, let's remove or hide all sites that don't have full-3d models"
+    assert "const with3d = panos.filter(p => p.welcome || variants(p).some(q => q.key === 'scape3d'));" in page
+    assert "get('all') !== '1'" in page and "if (with3d.some(p => !p.welcome)) panos = with3d;" in page
 
 
 def test_station_mesh_textures_kept_in_16_bits_and_retoned_as_the_panoramas(tmp_path):
@@ -590,6 +599,9 @@ def test_freeze3_root_block_order_busy_and_recolor(tmp_path):
                                               first=["rockytop"], reverse=True)]
     assert order == ["Sol0461", "Sol0477", "Sol0484_S026D1004_Z34", "Sol1955",
                      "Sol0670", "Sol0670_Z34", "Sol0009"]
+    order = [r["label"] for r in SS.run_order(runs, {"Sol0477": "Sol0484_S026D1004_Z34", "Sol0670": "Sol0670_Z34"},
+                                              first=["rockytop", "oeb"], reverse=True)]     # 1.0.3: in the order given
+    assert order == ["Sol0461", "Sol0477", "Sol0484_S026D1004_Z34", "Sol0009", "Sol1955", "Sol0670", "Sol0670_Z34"]
     assert SS._made_by_0p99({"rpp": "0.99.50"}) and not SS._made_by_0p99({"rpp": "0.98.31"})
     assert SS._made_by_0p99({"finished": "2026-11-19T18:24:54"}) and not SS._made_by_0p99({"finished": "2026-11-10T01:00:00"})
     r = runs[1]
@@ -887,3 +899,533 @@ def test_a_block_in_another_root(tmp_path, monkeypatch):
     assert SS.block_folder(st, f3) == f3 / "mars2020_sol_0015_van_zyl_overlook_huge"
     monkeypatch.setenv("RPP_BLOCK_ROOTS", str(old))
     assert SS.block_folder(st, f3) == old / "mars2020_sol_0015_van_zyl_overlook_huge"
+
+
+def test_the_sky_keeps_its_hills_and_is_smooth_above_the_skyline():
+    """1.0.1 (Christian, 21 Nov 2026: "use the panoramas own sky instead of white. Make sure that artifacts above the sky
+    line are smoothed out"): far texels below the skyline's circle keep their colors (a bright hazy hill is not sky),
+    above it they are the far texels' smooth mean - a frame's edge is gone."""
+    from rpp.ibr import station_mesh as M
+    S, rpx = 512, 250.0
+    knee = (np.pi / 2 + np.radians(5.0), 0.9)
+    yy, xx = np.mgrid[:S, :S]
+    rho = np.hypot(xx + 0.5 - S / 2, S / 2 - (yy + 0.5))
+    r_h = float(M._rho_of_theta(np.array([np.pi / 2]), rpx, np.pi, knee)[0])          # the horizon
+    r_k = knee[1] * rpx
+    far = (rho > r_h) & (rho <= rpx)
+    rgb = np.full((S, S, 3), 100.0, np.float32)
+    rgb[far] = 200.0
+    hill = far & (rho < r_h + 0.3 * (r_k - r_h)) & (xx > S / 2)                       # a bright hill, low
+    rgb[hill] = 230.0
+    edge = far & (rho > r_k + 2) & (xx < S / 2)                                       # a frame's edge in the sky: a step
+    rgb[edge] = 160.0
+    n = M.smooth_sky(rgb, far, S, rpx, knee)
+    assert n > 0 and np.allclose(rgb[hill], 230.0) and np.allclose(rgb[~far], 100.0)
+    up = far & (rho > r_k + 4)
+    row = rgb[int(S / 2 - r_k - 8), :, 0]                                             # a row high in the sky, across the step
+    seg = row[S // 2 - 20:S // 2 + 20]
+    assert float(np.abs(np.diff(seg)).max()) < 6.0 and 160.0 < float(seg.min()) and float(seg.max()) < 200.5   # a ramp
+
+
+def test_a_sheet_under_the_surface_takes_the_disc_and_bright_sky_keeps_its_hue():
+    """1.0.2: (a) a level sheet 0.1 m under another is "under a sheet", open ground is not; (b) the standard 8-bit view
+    rolls a bright sky off through its own color - no channel order changes, nothing changes below the knee, and far
+    above the knee it is white."""
+    from rpp.ibr import station_mesh as M
+    from rpp.ibr.linear16 import tone_pipeline, PIPELINE_KNEE
+    q = lambda z, s: np.array([[-s, -s, z], [s, -s, z], [s, s, z], [-s, s, z]], float)     # noqa: E731
+    V = np.concatenate([q(0.0, 1.0), q(-0.1, 3.0)])
+    F = np.array([[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]])
+    rc = M._raycaster(V, F)
+    up = (0.0, 0.0, 1.0)
+    got = M.under_a_sheet(rc, np.array([[0.2, 0.1, -0.1], [2.5, 2.5, -0.1], [0.2, 0.1, 0.0]]), up)
+    assert got.tolist() == [True, False, False]
+    sky = np.array([[235.0, 232.0, 248.0], [250.0, 240.0, 270.0], [100.0, 90.0, 80.0], [600.0, 500.0, 700.0]], np.float32)
+    out = tone_pipeline(sky)
+    assert np.allclose(out[2], sky[2])                                         # no channel above the knee: unchanged
+    assert (np.argsort(out[0]) == np.argsort(sky[0])).all() and (np.argsort(out[1]) == np.argsort(sky[1])).all()
+    assert out[0].max() <= 255 and out[0].max() - out[0].min() < sky[0].max() - sky[0].min()      # paler, same hue
+    assert (out[3] > 253).all() and PIPELINE_KNEE == 235.0                     # far above: white
+    ramp = np.stack([np.linspace(200, 400, 201)] * 3, axis=-1).astype(np.float32) * np.array([0.95, 0.9, 1.0], np.float32)
+    o = tone_pipeline(ramp)
+    assert (np.diff(o.max(axis=-1)) >= -1e-3).all() and float(np.abs(np.diff(o, axis=0)).max()) < 2.0    # no step
+
+
+def test_the_full_3d_sky_is_the_panoramas_above_the_skyline():
+    """1.0.2 (Christian, 21 Nov 2026: "fix the streaks in the full-3d. it isn't an issue in the ods"): pano_sky reads an
+    eye along a direction (row 0 the zenith, column 0 at azimuth0 east of north), and smooth_sky puts the panorama's
+    sky on the far texels above the skyline's circle - streaks in the texture's own sky are gone, the hills below stay."""
+    from rpp.ibr import station_mesh as M
+    up, north, east = (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)
+    H, W = 180, 360
+    pano = np.zeros((H, W, 3), np.float32)
+    pano[..., 0] = (np.arange(W) + 0.5)[None, :]                     # red: the azimuth in degrees (azimuth0 = 0)
+    pano[..., 1] = (90.0 - (np.arange(H) + 0.5))[:, None] + 100.0    # green: the elevation + 100
+    pano[..., 2] = 50.0
+    d = np.array([[np.sin(np.radians(90.0)) * np.cos(np.radians(30.0)), np.cos(np.radians(90.0)) * np.cos(np.radians(30.0)), np.sin(np.radians(30.0))],
+                  [np.sin(np.radians(200.0)) * np.cos(np.radians(60.0)), np.cos(np.radians(200.0)) * np.cos(np.radians(60.0)), np.sin(np.radians(60.0))]])
+    c = M.pano_sky(pano, 0.0, d, up, north, east)
+    assert np.allclose(c[:, 0], [90.0, 200.0], atol=0.6) and np.allclose(c[:, 1], [130.0, 160.0], atol=0.6)
+    assert np.allclose(M.pano_sky(pano, 40.0, d[:1], up, north, east)[0, 0], 50.0, atol=0.6)       # azimuth0 = 40
+    S, rpx = 512, 250.0
+    knee = (np.pi / 2 + np.radians(5.0), 0.9)
+    yy, xx = np.mgrid[:S, :S]
+    rho = np.hypot(xx + 0.5 - S / 2, S / 2 - (yy + 0.5))
+    r_h = float(M._rho_of_theta(np.array([np.pi / 2]), rpx, np.pi, knee)[0])
+    far = (rho > r_h) & (rho <= rpx)
+    rgb = np.full((S, S, 3), 80.0, np.float32)
+    rgb[far] = 200.0
+    rgb[far & (((np.degrees(np.arctan2(xx - S / 2, S / 2 - yy)) // 20) % 2) == 0)] = 150.0       # streaks to the zenith
+    hill = far & (rho < r_h + 0.3 * (knee[1] * rpx - r_h))
+    before = rgb[hill].copy()
+    flat = np.full((H, W, 3), 210.0, np.float32)
+    n = M.smooth_sky(rgb, far, S, rpx, knee, pano=(flat, 0.0), frame=(up, north, east))
+    high = far & (rho > knee[1] * rpx + 2)
+    assert n > 0 and np.allclose(rgb[high], 210.0, atol=0.5) and np.allclose(rgb[hill], before)
+
+
+def test_the_viewers_terrain_is_one_sheet_with_smaller_triangles_near_the_rover(monkeypatch):
+    """1.0.5 (Christian, 21 and 22 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; "There are still some
+    holes though"): top_sheet makes one sheet of a mesh of several - a ground with a crack in it, a second sheet under
+    the crack and an unsewn box on it: one height per place (the top), the crack raised to its rim, no rim inside the
+    sheet, and smaller triangles near the pivot than far from it."""
+    from rpp.ibr import station_mesh as SM
+    Vg, Fg = _grid(n=241, half=12.0)                                  # 0.1 m cells, z = 0
+    c = Vg[Fg].mean(axis=1)
+    Fg = Fg[~((np.abs(c[:, 0] - 3.05) < 0.05) & (np.abs(c[:, 1]) < 2.0))]        # a crack 10 cm wide, 4 m long
+    Vg = Vg + [0.02, 0.0, 0.0]                                        # (from x = 3.02 to 3.12)
+    Vu, Fu = _grid(n=25, half=12.0)
+    Vu = Vu - [0, 0, 0.2]                                             # the sheet beneath (the fill's underlay)
+    Vb, Fb = _box([0.0, 5.0, 0.3], [1.0, 1.0, 0.6])                   # a rock, not sewn to the ground
+    rng = np.random.default_rng(0)
+    Vg = Vg + np.c_[np.zeros((len(Vg), 2)), 0.01 * rng.standard_normal(len(Vg))]   # rough ground: nothing simplifies away
+    V = np.vstack([Vg, Vu, Vb])
+    F = np.vstack([Fg, Fu + len(Vg), Fb + len(Vg) + len(Vu)])
+    P, up = np.array([0.0, 0.0, 2.0]), np.array([0.0, 0.0, 1.0])
+    monkeypatch.setattr(SM, "TOP_ROCK_P95_MM", 1e6)                    # (the box's walls on a 5 cm grid: no limit here)
+    Vt, Ft, rec = SM.top_sheet(V, F, P, up, 10.0, 40000, step_m=0.05)
+    assert rec["no_surface"] == 0 and rec["pits_raised"] > 50 and 30000 < len(Ft) <= 40000
+    # Christian, 22 Nov 2026: "The simplification should simplify iteratively, reducing polygon count by ~50% repairing
+    # the mesh, then repeat until target poly count is met. Make sure not to simply the rocks in front of the rover too
+    # much": passes of a half each, the sheet repaired after every one, and the rocks by the rover held to the grid
+    ps = rec["passes"]
+    assert len(ps) >= 3 and all(0.45 < q["to"] / q["from"] < 0.56 for q in ps[:-1]) and ps[-1]["to"] == len(Ft)
+    assert all({"removed", "folded", "folds_dropped", "holes_closed"} <= set(q) for q in ps)
+    assert (SM.triangle_normals(Vt, Ft)[0] @ up > 0).all()            # no triangle folded over
+    nr = rec["near_rocks"]
+    assert nr["places"] > 100 and nr["within_m"] == 6.0 and nr["p95_mm"] < 60 and nr["triangles"] == len(Ft)
+    monkeypatch.setattr(SM, "TOP_ROCK_P95_MM", 1e-3)                   # a limit the rocks cannot meet: more triangles,
+    _, F2, rec2 = SM.top_sheet(V, F, P, up, 10.0, 40000, step_m=0.05)  # twice at most
+    assert 40000 * 1.3 * 1.3 * 0.9 < len(F2) <= 40000 * 1.3 * 1.3 and rec2["near_rocks"]["p95_mm"] <= nr["p95_mm"]
+    rc = SM._raycaster(Vt, Ft)
+    xy = rng.uniform(-9, 9, (4000, 2))
+    xy = xy[np.hypot(xy[:, 0], xy[:, 1]) < 9]
+    o = np.c_[xy, np.full(len(xy), 50.0)]
+    t, _ = SM._cast(rc, o, np.broadcast_to(-up, o.shape))
+    z = 50.0 - t
+    box = (np.abs(xy[:, 0]) < 0.4) & (np.abs(xy[:, 1] - 5.0) < 0.4)
+    crack = (np.abs(xy[:, 0] - 3.07) < 0.04) & (np.abs(xy[:, 1]) < 1.8)
+    away = (np.abs(xy[:, 0]) > 0.7) | (np.abs(xy[:, 1] - 5.0) > 0.7)
+    assert np.isfinite(z).all() and np.abs(z[box] - 0.6).max() < 0.02 and np.abs(z[away]).max() < 0.06
+    assert crack.sum() >= 2 and z[crack].min() > -0.06                # not the sheet 0.2 m beneath
+    t2, _ = SM._cast(rc, np.c_[xy, z + 0.05], np.broadcast_to(-up, o.shape))     # nothing under the sheet: one height
+    t3, _ = SM._cast(rc, np.c_[xy, z - 0.02], np.broadcast_to(-up, o.shape))
+    assert np.isfinite(t2).all() and not np.isfinite(t3[away]).any()
+    E = np.sort(np.concatenate([Ft[:, [0, 1]], Ft[:, [1, 2]], Ft[:, [2, 0]]]), axis=1)
+    _, cnt = np.unique(E, axis=0, return_counts=True)
+    rim = np.unique(E, axis=0)[cnt == 1]
+    assert np.hypot(*(Vt[rim].mean(axis=1)[:, :2]).T).min() > 9.5      # the only rim is the sheet's edge
+    cen = Vt[Ft].mean(axis=1)
+    edge = np.linalg.norm(Vt[Ft] - np.roll(Vt[Ft], 1, axis=1), axis=2).max(axis=1)
+    rr = np.hypot(cen[:, 0], cen[:, 1])
+    assert np.median(edge[rr < 3]) < 0.75 * np.median(edge[rr > 7])
+    Xw = SM._range_warp(Vt, P)
+    assert np.abs(SM._range_warp(Xw, P, back=True) - Vt).max() < 1e-9
+
+
+def test_hidden_cells_take_colors_grown_in_from_their_seen_edges():
+    """1.0.5 (Van Zyl: flat, jagged shards on the ground behind rocks): the vertices of hidden triangles take the
+    harmonic interpolation of the seen ones' colors, and a cell's texels no frame colored are interpolated between
+    its corners - a ramp, not one flat color; the texels a frame colored stay."""
+    from rpp.ibr import station_mesh as SM
+    n = 6                                                             # a strip of 5 quads along x; the ends are seen
+    V = np.array([[i, j, 0.0] for i in range(n) for j in range(2)], float)
+    F = np.array([t for i in range(n - 1) for t in ([2 * i, 2 * i + 2, 2 * i + 3], [2 * i, 2 * i + 3, 2 * i + 1])])
+    vis = np.zeros(len(F), bool)
+    vis[[0, 1, len(F) - 2, len(F) - 1]] = True
+    col = np.zeros((len(V), 3))
+    col[V[:, 0] >= n - 2] = 100.0                                     # the far end's seen vertices
+    got = SM.grown_vertex_colors(F, vis, col, default=(50.0, 50.0, 50.0))
+    mid = got[(V[:, 0] == 2) | (V[:, 0] == 3)][:, 0]
+    assert (got[V[:, 0] <= 1] == 0).all() and (got[V[:, 0] >= n - 2] == 100).all()
+    assert 20 < mid.min() < mid.max() < 80 and got[V[:, 0] == 2][:, 0].mean() < got[V[:, 0] == 3][:, 0].mean()
+    lone = SM.grown_vertex_colors(np.array([[0, 1, 2]]), np.array([False]), np.zeros((3, 3)), default=(7.0, 8.0, 9.0))
+    assert np.allclose(lone, [7.0, 8.0, 9.0], atol=1e-3)              # a patch that touches nothing seen: the default
+    size = 64
+    rgb = np.zeros((size, size, 3), np.float32)
+    have = np.zeros((size, size), bool)
+    have[10:12, 10:14] = True
+    rgb[10:12, 10:14] = 5.0
+    cells = {"pos": np.array([[8, 8]]), "wh": np.array([[40, 30]]),
+             "uv": np.array([[[12.0, 12.0], [44.0, 12.0], [12.0, 34.0]]]) / size}
+    k = SM.grow_cells(rgb, have, cells, np.array([[[0.0] * 3, [200.0] * 3, [0.0] * 3]]))
+    assert k == 40 * 30 - 8 and (rgb[10:12, 10:14] == 5.0).all()
+    row = rgb[13, 12:44, 0]
+    assert (np.diff(row) >= -1e-4).all() and row[-1] - row[0] > 150   # a ramp along the edge to the bright corner
+    assert rgb[9, 9, 0] < 5 and np.isfinite(rgb).all()                # the gutter: the nearest of the triangle
+
+
+def test_cells_that_do_not_fit_are_given_up_from_far_to_near(tmp_path, monkeypatch):
+    """1.0.5: a site of many hidden triangles - more cells than fit beside the disc - is not a failure: only those
+    nearer the mast get cells, the others take the disc."""
+    from rpp.ibr import ods as O, station_mesh as SM
+    proj, rec, st, sc = _scene(tmp_path)
+    src = O.station_sources(proj, rec, st, scale=1.0)
+    real = SM.layout_cells
+    seen = []
+
+    def tight(lay, areas, size, disc=None, **kw):
+        seen.append(len(areas))
+        if len(seen) < 3:
+            raise RuntimeError("station mesh: the cells do not fit the texture")
+        return real(lay, areas, size, disc=disc, **kw)
+    monkeypatch.setattr(SM, "layout_cells", tight)
+    tp = SM.terrain_part(sc, src, st, size=512, target=5000)
+    assert tp["record"]["cell_radius_m"] == 5.0 and seen[0] >= seen[1] >= seen[2]
+    assert tp["record"]["top_sheet"]["triangles"] <= 5000 and tp["record"]["under_a_sheet"] == 0
+    assert "grown" in tp["record"]["cell_fill"] or tp["record"]["triangles_in_cells"] == 0
+
+
+def test_the_full_3d_model_is_made_again_alone_when_only_its_code_changed(tmp_path, monkeypatch):
+    """1.0.5: the model's parts carry the hash of the module that makes them; a station whose panoramas stand and
+    whose model is of other code is not done, and the hash of the mesh / panorama code no longer takes the model's
+    module in - with a table of code that makes the same products as an earlier key."""
+    from rpp.ibr import ods as O, single_sites as SS, station_mesh as SM
+    proj, rec, st, sc = _scene(tmp_path)
+    sc.rover_triangles = None
+    monkeypatch.setattr(SM, "TEXTURE_PX", 512)
+    monkeypatch.setattr(SM, "TARGET_TRIANGLES", 5000)
+    out = tmp_path / "Sol0091"
+    out.mkdir()
+    O.render_station(proj, rec, st, sc, out, width=256, scale=1.0, rows_per_chunk=64, station_mesh="only", workers=1, prefix="Sol0091")
+    part = json.loads((out / "Sol0091_station_scape_terrain.json").read_text())
+    assert part["model_code"] == SM.model_code() and part["top_sheet"]["triangles"] <= 5000
+    assert not SS.model_stale(out, "masked") and SS.model_stale(out, "rover")
+    monkeypatch.setattr(SM, "model_code", lambda: "another")
+    assert SS.model_stale(out, "masked")
+    assert "station_mesh.py" in SS.NOT_IN_CODE_KEY
+    monkeypatch.setattr(SS, "SAME_PRODUCTS", {SS.code_hash(): "an-earlier-key"})
+    assert SS.code_key() == "an-earlier-key"
+    monkeypatch.setattr(SS, "SAME_PRODUCTS", {})
+    assert SS.code_key() == SS.code_hash()
+    run = {"out": str(out), "variants": ["masked"], "commands": [{"variant": "masked", "step": "ods", "argv": ["ods", "x", "--station-mesh"]}]}
+    (out / "ods.json").write_text("{}")
+    SS._CODE_CACHE.clear()
+    (out / "step_ods.json").write_text(json.dumps({"exit": 0, "code": SS.code_key()}))
+    assert not SS.station_done(run)                                   # the model is of other code
+    monkeypatch.undo()
+    SS._CODE_CACHE.clear()
+    (out / "step_ods.json").write_text(json.dumps({"exit": 0, "code": SS.code_key()}))
+    assert SS.station_done(run)
+    SS._CODE_CACHE.clear()
+
+
+def test_single_sites_makes_the_model_alone_when_the_panoramas_stand(tmp_path, monkeypatch):
+    """1.0.5: a station whose steps are up to date and whose full 3D model is of other code gets
+    ``rpp ods ... --station-mesh-only`` for each variant - no mesh, no maps, no panorama - and the panoramas' step
+    records are left as they are."""
+    from pathlib import Path
+    from rpp.ibr import single_sites as S, station_mesh as SM
+    work = tmp_path / "blk"
+    (work / "colmap" / "dense_S1").mkdir(parents=True)
+    (work / "colmap" / "dense_S1" / "fused.ply").write_bytes(b"x")
+    cfg = {"stations": {"S1": {"station": "1_2", "work": str(work)}}, "variants": ["rover", "masked"]}
+    ran = []
+
+    def fake(argv, fh):
+        only = "--station-mesh-only" in argv
+        ran.append((argv[0], "--rover" in argv, only))
+        if argv[0] in S.STEP_OUTPUT:
+            out = Path(argv[argv.index("--out") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            if not only:
+                (out / S.STEP_OUTPUT[argv[0]]).write_text("{}")
+            if argv[0] == "ods" and (only or "--station-mesh" in argv):
+                for kind in (("rover",) if "--rover" in argv else ("scape", "terrain")):
+                    (out / f"S1_{SM.PART[kind]}.json").write_text(json.dumps({"model_code": SM.model_code()}))
+        return 0
+    monkeypatch.setattr(S, "_run", fake)
+    out = tmp_path / "o"
+    assert S.run_all(S.plan(cfg, tmp_path, out, station_mesh=True), out) == 0 and len(ran) == 6
+    ran.clear()
+    assert S.run_all(S.plan(cfg, tmp_path, out, station_mesh=True), out) == 0 and ran == [("dense", False, False)]
+    before = {v: S.step_record(out / "S1" / v, "ods").read_text() for v in ("with_rover", "")}
+    monkeypatch.setattr(SM, "model_code", lambda: "the code of a later version")
+    ran.clear()
+    assert S.run_all(S.plan(cfg, tmp_path, out, station_mesh=True), out) == 0
+    assert ran == [("dense", False, False), ("ods", True, True), ("ods", False, True)]
+    assert before == {v: S.step_record(out / "S1" / v, "ods").read_text() for v in ("with_rover", "")}
+    assert "model" in (out / "single_sites_summary.md").read_text()
+    ran.clear()
+    assert S.run_all(S.plan(cfg, tmp_path, out, station_mesh=True), out) == 0 and ran == [("dense", False, False)]
+
+
+def test_1p0p5_stands_on_the_panoramas_of_1p0p4():
+    """1.0.5 changed the full 3D model alone: its mesh / panorama code carries the key of 1.0.4's records.  A change
+    to that code under this version number fails here - give the next version its own key, or its entry in
+    SAME_PRODUCTS when its meshes, maps and panoramas are truly the same."""
+    import rpp
+    from rpp.ibr import single_sites as SS
+    if rpp.__version__ == "1.0.5":
+        assert SS.code_key() == "9360937dcbf555b7" and SS.code_hash() != SS.code_key()
+
+
+class _SlopeScene:
+    """A ground that falls away to the south (20 deg) out to 40 m from the mast axis, nothing beyond it: a ray that
+    misses it meets the far surface ``far_m`` away (label far) or, with ``far_m`` None, nothing."""
+    def __init__(self, C, far_m):
+        self.C, self.far_m = np.asarray(C, float), far_m
+        self.n = np.array([0.0, -np.tan(np.radians(20.0)), 1.0])
+        self.n /= np.linalg.norm(self.n)
+        self.p0 = self.C - [0.0, 0.0, 2.0]
+
+    def cast(self, O, D):
+        from rpp.ibr.raycast import LABEL_FAR, LABEL_MESH, LABEL_NONE, SKY_RANGE_M
+        den = D @ self.n
+        t = ((self.p0 - O) @ self.n) / np.where(np.abs(den) > 1e-12, den, 1e-12)
+        X = O + t[:, None] * D
+        hit = (t > 0) & (den < 0) & (np.hypot(X[:, 0] - self.C[0], X[:, 1] - self.C[1]) <= 40.0)
+        if self.far_m is None:
+            return {"t": np.where(hit, t, np.inf), "label": np.where(hit, LABEL_MESH, LABEL_NONE)}
+        return {"t": np.where(hit, t, min(self.far_m, SKY_RANGE_M)), "label": np.where(hit, LABEL_MESH, LABEL_FAR)}
+
+
+def test_the_horizon_shell_has_no_gap_where_the_ground_falls_away_nor_at_the_zenith():
+    """1.0.5 (Christian, 22 Nov 2026, in the headset: "a black semi circle behind skinner ridge and the others"): the
+    shell began at the angle of 17 m on LEVEL ground at every azimuth; downhill the ground at that angle is far beyond
+    the near terrain's end and the band between had no triangle.  And a far surface close overhead (105 m at Skinner
+    Ridge) put the last ring within 17 m of the axis: no sky in a wedge at the zenith.  Every direction whose surface
+    is beyond the near terrain now meets the shell."""
+    from rpp.ibr import station_mesh as SM
+    up, north, east = np.array([0.0, 0.0, 1.0]), np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0])
+    C = np.array([0.0, 0.0, 2.0])
+    for far_m in (100.0, None):
+        sc = _SlopeScene(C, far_m)
+        sh = SM.horizon_shell(sc, C, C, up, north, east)
+        rc = SM._raycaster(sh["V"], sh["F"])
+        az, el = np.meshgrid(np.radians(np.arange(0.25, 360.0, 2.0)), np.radians(np.r_[np.arange(-45.0, 0.0, 0.5), 30.0, 60.0, 85.0, 89.5]))
+        az, el = az.ravel(), el.ravel()
+        D = np.c_[np.cos(el) * np.sin(az), np.cos(el) * np.cos(az), np.sin(el)]
+        O = np.broadcast_to(C, D.shape).copy()
+        true = sc.cast(O, D)
+        X = O + np.where(np.isfinite(true["t"]), np.minimum(true["t"], 1e5), 1e5)[:, None] * D
+        beyond = np.hypot(X[:, 0], X[:, 1]) >= SM.SHELL_FROM_M + 1.0          # the near terrain does not cover it
+        t, _ = SM._cast(rc, O, D)
+        assert beyond.sum() > 2000 and np.isfinite(t[beyond]).all(), (far_m, int((~np.isfinite(t[beyond])).sum()))
+        south = beyond & (np.abs(np.degrees(az) - 180.0) < 20) & (np.degrees(el) < -21.0)
+        assert south.sum() > 20                                               # the band that was black
+        assert np.isfinite(t[np.degrees(el) > 80]).all()                      # ... and the zenith
+        hd = np.hypot(*(sh["V"][:, :2] - C[:2]).T)
+        ground = np.linalg.norm(sh["V"] - C, axis=1) < 60.0
+        assert hd[sh["F"]][ground[sh["F"]].all(axis=1)].max(axis=1).min() >= SM.SHELL_FROM_M - 1.5     # still nothing of the ground under the rover (a quad's other triangle)
+
+
+def test_the_full_3d_sky_is_a_model_of_the_panoramas_sky():
+    """1.0.5 (Christian, 22 Nov 2026, Rockytop in the headset: "the top pole has artifacts in the sky"): above the
+    skyline's circle the texture takes a model of the panorama's sky - one color per elevation (the median over the
+    azimuths, outliers and empty pixels out), the panorama's own color along the circle fading into it - so a dark
+    patch by the zenith and an oval of another color are not carried into the model."""
+    from rpp.ibr import station_mesh as M
+    H, W = 360, 720
+    el = 90.0 - (np.arange(H) + 0.5) * 180.0 / H
+    pano = np.zeros((H, W, 3), np.float32)
+    pano[:] = (200.0 + 0.5 * el)[:, None, None] * np.array([1.0, 0.95, 0.9], np.float32)      # brighter to the zenith
+    yy, xx = np.mgrid[:H, :W]
+    blob = (xx - 60) ** 2 / 50.0 ** 2 + (yy - 40) ** 2 / 25.0 ** 2 < 1                         # a dark red patch at 70 deg
+    pano[blob] = (90.0, 10.0, 5.0)
+    pano[:6] = 0.0                                                                             # nothing at the pole
+    oval = (xx - 400) ** 2 / 120.0 ** 2 + (yy - 120) ** 2 / 20.0 ** 2 < 1                      # another color low in the sky
+    pano[oval] *= np.array([0.93, 0.88, 0.95], np.float32)
+    m = M.sky_model(pano, 20.0)
+    assert m.shape == (180, 360, 3)
+    clean = (200.0 + 0.5 * (90.0 - (np.arange(180) + 0.5)))[:, None, None] * np.array([1.0, 0.95, 0.9])
+    assert np.abs(m[:45] - clean[:45]).max() < 3.0                    # the patch and the empty pole are gone
+    assert np.ptp(m[:30], axis=1).max() < 1.0 and np.ptp(m[:45], axis=1).max() < 4.0   # one color per elevation up there
+    assert np.abs(m[:70] - clean[:70]).max() < 26.0                   # the oval: the panorama's color at the circle, fading - no edge
+    assert np.abs(np.diff(m[:70], axis=1)).max() < 1.0 and np.abs(np.diff(m[:70], axis=0)).max() < 4.0
+    # smooth_sky uses it: the far texels above the circle carry the model, not the patch
+    up, north, east = (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)
+    S, rpx = 512, 250.0
+    knee = (np.pi / 2 + np.radians(20.0), 0.9)
+    yy, xx = np.mgrid[:S, :S]
+    rho = np.hypot(xx + 0.5 - S / 2, S / 2 - (yy + 0.5))
+    far = (rho > float(M._rho_of_theta(np.array([np.pi / 2]), rpx, np.pi, knee)[0])) & (rho <= rpx)
+    rgb = np.full((S, S, 3), 80.0, np.float32)
+    assert M.smooth_sky(rgb, far, S, rpx, knee, pano=(pano, 0.0), frame=(up, north, east)) > 0
+    high = far & (rho > knee[1] * rpx + 3)
+    assert rgb[high][:, 0].min() > 195.0 and (rgb[high][:, 1] > 0.9 * rgb[high][:, 0]).all()   # no dark red texel
+    rgb2 = np.full((S, S, 3), 80.0, np.float32)
+    M.SKY_MODEL = False
+    try:
+        M.smooth_sky(rgb2, far, S, rpx, knee, pano=(pano, 0.0), frame=(up, north, east))
+    finally:
+        M.SKY_MODEL = True
+    assert rgb2[high][:, 0].min() < 120.0                             # (the panorama's own pixels: the patch is there)
+
+
+def _patch(x0, x1, y0, y1, z, step=0.05):
+    xs, ys = np.arange(x0, x1 + 1e-9, step), np.arange(y0, y1 + 1e-9, step)
+    X, Y = np.meshgrid(xs, ys)
+    V = np.c_[X.ravel(), Y.ravel(), np.full(X.size, float(z))]
+    ny, nx = X.shape
+    i, j = np.meshgrid(np.arange(ny - 1), np.arange(nx - 1), indexing="ij")
+    a = (i * nx + j).ravel()
+    return V, np.r_[np.c_[a, a + 1, a + nx], np.c_[a + 1, a + nx + 1, a + nx]]
+
+
+def test_a_floater_on_a_post_is_lowered_and_a_ledge_and_a_boulders_overhang_stay(monkeypatch):
+    """1.0.5 (Christian, 22 Nov 2026, Wildcat Ridge: "a bad floater attached to the ground in front of the rover"): a
+    sheet in the air on a thin post goes down to the ground under it, the post with it; an outcrop's ledge (held by the
+    hill along its back), a boulder's overhang (smaller than the boulder) and a slab with the ground inside it (the
+    mast does not see that ground) stay as they are."""
+    from rpp.ibr import station_mesh as SM
+    monkeypatch.setattr(SM, "TOP_ROCK_P95_MM", 1e6)
+    Vg, Fg = _grid(n=241, half=12.0)                                  # the ground, z = 0, with ...
+    Vg[Vg[:, 0] <= -5.0 + 1e-9, 2] = 1.0                              # ... a hill 1 m high west of x = -5 (one sheet)
+    Vg[(np.abs(Vg[:, 0]) <= 0.5 + 1e-9) & (np.abs(Vg[:, 1] - 6.5) <= 0.5 + 1e-9), 2] = 0.9      # ... and a boulder 1 m x 1 m
+    Vg[(np.abs(Vg[:, 0] - 5.5) < 1e-6) & (np.abs(Vg[:, 1]) < 1e-6), 2] = 1.47                   # ... and a spike 1.47 m high:
+    parts = [(Vg, Fg)]                                                # the post of ...
+    parts.append(_patch(4.0, 7.0, -0.5, 0.5, 1.5))                    # ... the floater: 3 m x 1 m, 1.5 m up
+    parts.append(_patch(-5.0, -4.2, -9.0, -5.0, 1.0))                 # the hill's ledge, 0.8 m out over the ground
+    parts.append(_patch(0.5, 0.9, 6.0, 7.0, 0.9))                     # the boulder's overhang, 0.4 m
+    parts.append(_box([-2.0, -8.0, 0.25], [2.0, 2.0, 0.5]))           # a slab with the ground under it, walled in
+    V, F, n = [], [], 0
+    for v, f in parts:
+        V.append(v)
+        F.append(np.asarray(f) + n)
+        n += len(v)
+    V, F = np.vstack(V), np.vstack(F)
+    P, up = np.array([0.0, 0.0, 2.0]), np.array([0.0, 0.0, 1.0])
+    Vt, Ft, rec = SM.top_sheet(V, F, P, up, 11.5, 60000, step_m=0.05)
+    fl = rec["floaters"]
+    assert fl["pieces"] == 1 and 2.5 < fl["m2"] < 3.6 and fl["largest"][0]["held"] < 0.05 and fl["largest"][0]["seen_under"] > 0.8
+    assert fl["pieces_kept"] >= 3 and fl["posts_lowered"] >= 1
+    rc = SM._raycaster(Vt, Ft)
+
+    def height(x, y):
+        t, _ = SM._cast(rc, np.array([[x, y, 50.0]]), np.array([[0.0, 0.0, -1.0]]))
+        return 50.0 - float(t[0]) - P[2] + P[2]
+    assert max(abs(height(x, y)) for x in (4.3, 5.0, 5.5, 6.0, 6.7) for y in (-0.3, 0.0, 0.3)) < 0.08     # the floater and its post: gone
+    assert min(height(x, -7.0) for x in (-8.0, -6.0, -4.9, -4.5)) > 0.9                                   # the ledge stays ...
+    assert min(height(x, 6.5) for x in (0.0, 0.3, 0.6, 0.8)) > 0.8                                        # ... the boulder's overhang ...
+    assert height(-2.0, -8.0) > 0.42                                                                      # ... and the slab
+    monkeypatch.setattr(SM, "TOP_FLOATERS", False)                    # without the rule: the floater is a wall 1.5 m high
+    V0, F0, rec0 = SM.top_sheet(V, F, P, up, 11.5, 60000, step_m=0.05)
+    rc = SM._raycaster(V0, F0)
+    assert "floaters" not in rec0 and height(5.0, 0.0) > 1.4
+
+
+def test_the_rover_is_textured_where_the_frames_see_it_even_where_their_masks_miss_it(tmp_path, monkeypatch):
+    """1.0.5 (Christian, 22 Nov 2026: the rover model has more gray surfaces than it should - "Texture every surface
+    that the ncams see"): a rover triangle a frame of the station sees is textured even when no viewpoint within 1 m
+    sees it, and a texel the frames see but whose rover masks call it terrain (a strut, a rim the mask misses) is
+    colored in a second pass without the masks - not left gray."""
+    from rpp.ibr import ods as O, station_mesh as SM
+    proj, rec, st, sc = _scene(tmp_path)
+    src = O.station_sources(proj, rec, st, scale=1.0)
+    base = SM.rover_part(sc, src, st, size=256)["record"]
+    assert base["frames"] == len(src) and base["seen_by_frames"] > 0
+    for s in src:                                       # masks that see no rover anywhere
+        s.model_rover = np.zeros((s.H, s.W), bool)
+    monkeypatch.setattr(SM, "ROVER_UNMASKED_PASS", False)
+    r0 = SM.rover_part(sc, src, st, size=256)["record"]
+    monkeypatch.setattr(SM, "ROVER_UNMASKED_PASS", True)
+    r1 = SM.rover_part(sc, src, st, size=256)["record"]
+    assert r0["texels_colored_without_rover_mask"] == 0 and r0["texels_colored"] < 0.5 * base["texels_colored"]
+    assert r1["texels_colored_without_rover_mask"] > 0 and r1["texels_colored"] > r0["texels_colored"] + 0.1
+    assert O.SURFACE_CHECK is True                     # (the second pass leaves the panoramas' check as it was)
+    for s in src:
+        s.model_rover = None
+    s0 = src[0]
+    s0.context = True                                   # a frame of another place never colors the rover
+    assert SM.rover_sources(src, "N") == src[1:]
+    s0.context = False
+    # viewpoints that see nothing (50 m under the ground): what is textured is what the frames see
+    monkeypatch.setattr(SM, "viewpoints", lambda pivot, *a, **k: np.asarray(pivot, float)[None] + [[0.0, 0.0, -50.0]])
+    r2 = SM.rover_part(sc, src, st, size=256)["record"]
+    assert r2["textured_triangles"] == r2["seen_by_frames"] == r2["seen_by_frames_only"] > 0
+
+
+def test_the_terrain_is_held_under_the_mast_skyline():
+    """1.0.6 (Christian, 22 Nov 2026: "the white fill behind Skinner's crest"): where the panorama shows sky, nothing
+    solid lies along the ray.  A ridge 15 m north whose top the mesh carries on behind the crest, 0.6 m above the line
+    where the panorama sees sky: the crest stays, the top behind it goes under the skyline's ray; the other azimuths,
+    and anything within 3 m, are not touched."""
+    from rpp.ibr import station_mesh as SM
+    H, W = 900, 1800
+    el = 90.0 - (np.arange(H)[:, None] + 0.5) / H * 180.0
+    az = (np.arange(W)[None, :] + 0.5) / W * 360.0
+    P = np.array([0.0, 0.0, 2.0]); up, north, east = np.array([0, 0, 1.0]), np.array([0, 1.0, 0]), np.array([1.0, 0, 0])
+    crest_el = np.degrees(np.arctan2(3.0 - 2.0, 15.0))           # the crest: 3 m high at 15 m north, seen from 2 m
+    sky_line = np.where(np.abs(((az + 180) % 360) - 180) < 30, crest_el, -3.0)    # the ridge within 30 deg of north
+    pano = np.where((el > sky_line)[..., None], np.array([230.0, 200.0, 190.0]), np.array([120.0, 70.0, 50.0])).astype(np.float32)
+    sk = SM.pano_skyline(pano)
+    assert sk is not None and abs(float(sk[0]) - crest_el) < 0.5 and abs(float(sk[W // 2])) < 4.0
+    c = SM.SkyCeiling(sk, 0.0, P, up, north, east)
+    Vg, Fg = _grid(n=241, half=24.0)                              # 0.2 m cells
+    Vg = Vg.copy()
+    y = Vg[:, 1]
+    ridge = (y >= 15.0) & (np.abs(Vg[:, 0]) < 6.0)
+    Vg[ridge, 2] = 3.0 + 0.04 * (y[ridge] - 15.0) * 15.0          # the top rises behind the crest (0.6 m over 1 m...)
+    Vg[(np.abs(Vg[:, 0]) < 0.3) & (np.abs(y - 1.5) < 0.3), 2] = 4.0   # a mast-like post at 1.5 m: left alone
+    Vt, Ft, rec = SM.top_sheet(Vg, Fg, P, up, 20.0, 60000, step_m=0.1, ceiling=c)
+    sc = rec["sky_ceiling"]
+    assert sc["m2"] > 5.0 and sc["behind_the_crest_m2"] > 0.8 * sc["m2"] and sc["lowered_by_m_max"] < 4.0
+    rc = SM._raycaster(Vt, Ft)
+
+    def h(x, yy):
+        t, _ = SM._cast(rc, np.array([[x, yy, 50.0]]), np.array([[0.0, 0.0, -1.0]]))
+        return 50.0 - float(t[0])
+    assert abs(h(0.0, 15.05) - 3.0) < 0.1                         # the crest stays
+    r = 18.0
+    assert h(0.0, r) < 2.0 + r * np.tan(np.radians(crest_el))      # behind it: under the skyline's ray ...
+    assert h(0.0, r) > 2.0 + r * np.tan(np.radians(crest_el - 1.0))  # ... by a fraction of a degree
+    assert h(0.0, 1.5) > 3.5                                      # nearer than 3 m: not touched
+    assert abs(h(-10.0, -10.0)) < 0.05                            # other azimuths: as they were
+
+
+def test_a_mastcam_z_version_takes_the_navcam_runs_rover(tmp_path):
+    """1.0.6 (Christian, 22 Nov 2026: "The z34 full 3d should use the ncam rover texture"): the planned rover step of a
+    Mastcam-Z version names its Navcam station's with_rover folder, and copy_part brings that part in under its own
+    prefix."""
+    import json as _json
+    from rpp.ibr import single_sites as SS, station_mesh as SM
+    cfg = SS.load_config()
+    for z, n in (("Sol0011_Z34", "Sol0009"), ("Sol0690_Z34", "Sol0686")):
+        r = SS.plan(cfg, tmp_path, labels=[z], station_mesh=True)[0]
+        a = next(c["argv"] for c in r["commands"] if c["step"] == "ods" and c["variant"] == "rover")
+        assert a[a.index("--rover-part-from") + 1].endswith(str(__import__("pathlib").Path(n) / "with_rover"))
+        m = next(c["argv"] for c in r["commands"] if c["step"] == "ods" and c["variant"] == "masked")
+        assert "--rover-part-from" not in m
+    src, dst = tmp_path / "nav", tmp_path / "z"
+    src.mkdir(); dst.mkdir()
+    for ext, data in ((".npz", b"npz"), (".jpg", b"jpg"), ("_16.png", b"png")):
+        (src / f"Sol0009_rover_station_mesh_rover{ext}").write_bytes(data)
+    (src / "Sol0009_rover_station_mesh_rover.json").write_text(_json.dumps({"kind": "rover", "model_code": "m", "files": [
+        "Sol0009_rover_station_mesh_rover.npz", "Sol0009_rover_station_mesh_rover.jpg", "Sol0009_rover_station_mesh_rover_16.png"]}))
+    rec = SM.copy_part(src, dst, "Sol0011_Z34", "rover")
+    assert rec["files"] == ["Sol0011_Z34_station_mesh_rover.npz", "Sol0011_Z34_station_mesh_rover.jpg", "Sol0011_Z34_station_mesh_rover_16.png"]
+    assert (dst / "Sol0011_Z34_station_mesh_rover.jpg").read_bytes() == b"jpg" and rec["model_code"] == "m"
+    assert SM.copy_part(tmp_path / "none", dst, "x") is None
+
+
+def test_the_viewer_keeps_the_old_station_until_the_new_one_is_up():
+    """1.0.6 (Christian, 22 Nov 2026): no black screen between stations - the old surfaces are dropped only once the new
+    ones are made; the neighbors' 3D files are fetched ahead."""
+    from pathlib import Path
+    from rpp.ibr import single_sites as SS
+    page = (Path(SS.__file__).resolve().parents[1] / "viewer" / "index.html").read_text(encoding="utf-8")
+    i = page.index("async function showRover(")
+    body = page[i:page.index("async function loadSurface(")]
+    assert body.index("dropRover();                                                 // 1.0.6") > body.index("await loadSurface(")
+    assert "const buf = await fetchGlb(" in page and "prefetchNeighbors();" in page and "GLB_CACHE = 4" in page

@@ -56,10 +56,17 @@ log = logging.getLogger("rpp.ibr")
 
 RADIUS_M = 20.0                 # the terrain within this horizontal distance of the mast axis (0.99.39, Christian, 19 Nov
 #                                 2026: "the 3d terrain should go out to 20 m instead of 10 m"; 10 m before)
-CENTER_ABOVE_M = 0.5            # the terrain texture's projection center above the pivot
+CENTER_ABOVE_M = 0.0            # the terrain texture's projection center above the pivot.  1.0.1 (Christian, 21 Nov 2026:
+#                                 "dark strips on the terrain ... from the ods pivot being rendered from a position
+#                                 higher than the ncam views"; "use the same projection on the ods and full-3d
+#                                 texture"): the pivot itself, the panorama's center (0.5 m above it until 1.0) - from
+#                                 there the disc holds what the mast cameras saw, and no sliver of unseen ground
+#                                 behind each rock, colored from other frames, outlines it
 TARGET_TRIANGLES = 500_000      # the simplified terrain ("medium poly"; 300,000 within 10 m until 0.99.39)
 TEXTURE_PX = 8192               # the terrain texture's side
-ROVER_TEXTURE_PX = 4096         # the rover texture's side
+ROVER_TEXTURE_PX = 8192         # the rover texture's side as it is made and kept (1.0.1, Christian, 21 Nov 2026: "A 8k rover
+#                                 texture is useful, but we probably want to serve 4k in vr"; 4096 until 1.0)
+ROVER_GLB_PX = 4096             # ... and its side in the viewer's .glb files (reduced from the kept one)
 VIEW_RADIUS_M = 1.0             # the rover is textured where it can be seen from within this distance of the pivot
 VIEWPOINTS = 32                 # directions of the viewpoints on each sphere (0.5 m and VIEW_RADIUS_M)
 ROVER_FAMILIES = "N"            # the frames that color the rover ("viewed by the ncams")
@@ -86,8 +93,12 @@ GRAY_STRIP = (4, 64)            # the rover gray's cell: width, height (the shad
 # 1.0 (Christian, 20 Nov 2026: "the mesh_rover texture should also have larger texture islands if possible"): the rover's
 # triangles share charts (:func:`triangle_charts`) in place of a cell each - fewer seams and less of the texture spent
 # on gutters
-CHART_MAX_DEG = 35.0            # a chart's triangles face within this angle of its first (largest) triangle
-CHART_MAX_M = 0.6               # a chart's longest side, in its plane
+CHART_MAX_DEG = 50.0            # a chart's triangles face within this angle of its first (largest) triangle (1.0.1,
+#                                 Christian, 21 Nov 2026: "Larger patches (merge neighbors facing the same way)"; 35 deg
+#                                 and 0.6 m until 1.0: on the rover model 21,800 charts, 13 % of its area in charts of
+#                                 one triangle - with 50 deg and 1 m 14,200 and none; 70 deg gives only 13,000: the
+#                                 model is made of small parts)
+CHART_MAX_M = 1.0               # a chart's longest side, in its plane
 MAX_CHART_PX = 1024             # a chart's longest side in texels; a larger chart is given coarser texels
 WELD_M = 1e-4                   # vertices nearer than this are one (the model repeats them along its hard edges)
 CHART_OVERLAP_TOL = 0.03        # a chart whose triangles cover more than its outline by this share folds over itself
@@ -113,6 +124,7 @@ SKY_WHITE = True                # 0.99.41 (Christian, 19 Nov 2026: "the sky stil
 #                                 joined to the zenith - not the hills beyond the mesh) and the texels no triangle
 #                                 uses are white
 POLE_WHITE_EL_DEG = 60.0        # 0.99.52: the fifth mode's texture is sky white above this elevation (no hill rises so high)
+SHELL_NEAR_TOL_M = 0.25         # 1.0.5: the scene this much nearer than the drawn terrain along a ray is not the terrain
 SHELL_FROM_M = 17.0             # the shell starts this far from the mast axis (the near mesh fades out over FADE_M; 7 m
 #                                 until 0.99.39)
 FADE_M = (18.0, 20.0)           # the near terrain's opacity: 1 at the first, 0 at the second (horizontal m from the axis;
@@ -135,8 +147,472 @@ def page_frame(X: np.ndarray, pivot, east, up, north) -> np.ndarray:
 
 
 # ------------------------------------------------------------------------------------------- geometry
-def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TARGET_TRIANGLES) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    """(V, F, record) of the scene's mesh within ``radius_m`` of the mast axis, without the rover model, simplified."""
+TOP_SHEET = True                # 1.0.5: the viewer's terrain is the mesh's top surface, one sheet (see top_sheet)
+TOP_STEP_M = 0.025              # ... sampled on a grid of this step
+TOP_PIT_WIDTH_M = 0.12          # a pit narrower than this ...
+TOP_PIT_DEPTH_M = 0.04          # ... and deeper than this is a crack between two sheets: raised to its rim
+TOP_NEAR_M = 2.0                # the simplified triangles are of one size within this of the mast axis ...
+TOP_RANGE_POWER = 0.6           # ... and grow with the range to this power beyond (0: one size everywhere)
+TOP_ROCKS_TO_M = 6.0            # the rocks by the rover: the places within this of the mast axis ...
+TOP_ROCK_RELIEF_M = 0.08        # ... where the surface rises or falls this much within 0.25 m
+TOP_ROCK_P95_MM = 3.0           # the simplified sheet is within this of the sampled surface at 95 % of them, or the
+TOP_ROCK_MORE = 1.3             # simplification is done again with this many times the triangles (twice at most)
+
+
+def _range_warp(X: np.ndarray, P: np.ndarray, back: bool = False) -> np.ndarray:
+    """The points about ``P`` scaled by (range / TOP_NEAR_M) ** -TOP_RANGE_POWER beyond ``TOP_NEAR_M`` (range in 3D
+    from P), or back.  Simplifying in the scaled space leaves triangles that grow with the range: more of them near
+    the rover."""
+    near_m, power = float(TOP_NEAR_M), float(TOP_RANGE_POWER)
+    v = np.asarray(X, float) - P
+    r = np.linalg.norm(v, axis=1)
+    if back:
+        r0 = np.where(r > near_m, near_m * (np.maximum(r, 1e-12) / near_m) ** (1.0 / (1.0 - power)), r)
+        return P + v * (r0 / np.maximum(r, 1e-12))[:, None]
+    return P + v * np.where(r > near_m, (np.maximum(r, 1e-12) / near_m) ** -power, 1.0)[:, None]
+
+
+TOP_FLOATERS = True             # 1.0.5: the top surface is not taken where it floats (see under_floaters)
+TOP_FLOATER_AIR_M = 0.4         # ... with this much air under it
+TOP_FLOATER_THICK_M = 0.6       # ... and is no thicker than this itself (a hill's overhang is thicker)
+TOP_FLOATER_LAYERS = 4          # the surfaces looked at under the top one
+TOP_FLOATER_MIN_M2 = 0.05       # a floating piece smaller than this stays (a rock's rim)
+TOP_FLOATER_JOIN_M = 0.15       # the ground beside a piece is joined to it when their heights differ by less ...
+TOP_FLOATER_BROAD_M = 1.5       # ... and holds it when it is no narrower than this (a post or a pillar holds nothing)
+TOP_FLOATER_PROUD_M = 0.3       # (narrower: it stands this much above the ground opened at that width)
+TOP_FLOATER_HELD = 0.1          # a piece held along less than this share of its rim ...
+TOP_FLOATER_OVER = 2.0          # ... and this many times larger than the narrow thing it stands on is a floater ...
+TOP_FLOATER_SEEN = 0.5          # ... when the mast sees the surface beneath it under this share of it or more
+TOP_POST_NEAR_M = 0.5           # what held a floater - within this of where it was - is lowered when it is ...
+TOP_POSTS = ((0.35, 0.2), (0.7, 0.7), (1.4, 2.1))    # ... narrower than (width m) and taller than (height m): a post
+
+
+def under_floaters(rc, base: np.ndarray, h: np.ndarray, hit: np.ndarray, inside: np.ndarray, pivot: np.ndarray,
+                   up: np.ndarray, step_m: float) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """1.0.5 (Christian, 22 Nov 2026, Wildcat Ridge Sol0502: "a bad floater attached to the ground in front of the
+    rover" - a sheet 5.4 m long and 1.3 m wide hanging 2 m over the slope at the mast's height, held to the ground
+    by a thin post, so that no rule for loose pieces took it; Rockytop has one 17 m out on a pillar).  ``h`` (n,):
+    the top surface's height above the pivot along ``up`` over the places ``base`` (n, 3; at the pivot's level),
+    which are the True cells of the grid ``inside``; returned lowered to the surface beneath where the top one
+    FLOATS:
+
+    * a place floats when under it, within ``TOP_FLOATER_THICK_M``, the mesh ends and ``TOP_FLOATER_AIR_M`` or more
+      of air follows before the next surface (up to ``TOP_FLOATER_LAYERS`` surfaces are looked at);
+    * the floating places that touch are one piece, and a piece is a floater when the ground does not hold it:
+      along its rim, the cells beside it that are at its height (``TOP_FLOATER_JOIN_M``) AND are broad ground
+      (not narrower than ``TOP_FLOATER_BROAD_M``) are less than ``TOP_FLOATER_HELD`` of the rim, AND the piece
+      is more than ``TOP_FLOATER_OVER`` times as large as the narrow thing it is joined to.  A ledge of an outcrop
+      floats too, but the hill holds it along its back, and a boulder's overhang is smaller than the boulder: both
+      stay whole (the first rule lowered every floating place the mast saw under - Skinner Ridge's ledges came out
+      as teeth; the second took the overhang off a boulder 3.5 m from the rover there);
+    * and the mast SEES the surface beneath it under ``TOP_FLOATER_SEEN`` of the piece or more: the ground under a
+      floater was measured through the place where the floater would be solid - so it is not.  What lies inside or
+      beneath a solid thing (another sheet of the mesh, the fill) is hidden by the thing and does not pass;
+    * what held a floater is lowered with it: within ``TOP_POST_NEAR_M`` of where it was, a thing narrower and
+      taller than a pair of ``TOP_POSTS`` goes down to the ground around it.
+
+    Returns (h, record)."""
+    from scipy import ndimage as ndi
+    n = len(h)
+    cur = np.asarray(h, float).copy()                           # the surface the walk is at
+    roof = cur.copy()                                           # the top one
+    out = cur.copy()
+    alive = np.asarray(hit, bool).copy()
+    low = np.zeros(n, bool)
+    seen = np.zeros(n, bool)
+    for _ in range(int(TOP_FLOATER_LAYERS)):
+        i = np.flatnonzero(alive)
+        if not len(i):
+            break
+        o = base[i] + (cur[i] - 0.02)[:, None] * up
+        t, _ = _cast(rc, o, np.broadcast_to(-up, o.shape))
+        nxt = cur[i] - 0.02 - t
+        got = np.isfinite(t)
+        air = got & (t + 0.02 >= TOP_FLOATER_AIR_M) & (roof[i] - cur[i] <= TOP_FLOATER_THICK_M)
+        j = i[air]
+        out[j] = nxt[air]
+        low[j] = True
+        roof[j] = out[j]                                        # the walk goes on from there: a floater over a floater
+        if len(j):                                              # does the mast see the surface beneath?
+            seen[j] = seen_from(rc, base[j] + (out[j] + 0.03)[:, None] * up, pivot)
+        cur[i] = np.where(got, nxt, cur[i])
+        alive[i] = got
+    rec: Dict[str, Any] = {"floating_places": int(low.sum()), "air_m": TOP_FLOATER_AIR_M, "thick_m": TOP_FLOATER_THICK_M,
+                           "held": TOP_FLOATER_HELD, "pieces": 0, "pieces_kept": 0, "places": 0, "m2": 0.0, "posts_lowered": 0}
+    if not low.any():
+        return np.asarray(h, float).copy(), rec
+    g = float(step_m)
+    H = np.full(inside.shape, -1e4)
+    H[inside] = np.asarray(h, float)
+    Hl = H.copy()
+    Hl[inside] = out
+    M = np.zeros(inside.shape, bool)
+    M[inside] = low
+    Sn = np.zeros(inside.shape, bool)
+    Sn[inside] = seen
+    have = H > -5e3
+
+    def opening(Z, k):                                          # an opening (gray level) that leaves the grid's edge alone: no
+        er = ndi.grey_erosion(np.where(have, Z, 1e4), size=(k, k))     # cell outside the disc pulls the ground down
+        return ndi.grey_dilation(np.where(have, er, -1e4), size=(k, k))
+    kb = max(3, int(round(TOP_FLOATER_BROAD_M / g)) | 1)
+    Hop = opening(H, kb)                                        # the ground without what is narrower than "broad"
+    lab, k = ndi.label(M, structure=np.ones((3, 3), bool))
+    sizes = np.bincount(lab.ravel(), minlength=k + 1)
+    least = max(2, int(np.ceil(TOP_FLOATER_MIN_M2 / (g * g))))
+    gone = np.zeros(inside.shape, bool)
+    took = []
+    pad = kb // 2 + 2
+    proud_all = have & (H - Hop > TOP_FLOATER_PROUD_M)          # what stands on the ground and is narrower than "broad"
+    for c, sl in enumerate(ndi.find_objects(lab), start=1):
+        if sl is None or sizes[c] < least:
+            continue
+        sl = tuple(slice(max(0, a.start - pad), min(dim, a.stop + pad)) for a, dim in zip(sl, inside.shape))
+        comp = lab[sl] == c
+        stand = 0.0
+        rim = ndi.binary_dilation(comp, structure=np.ones((3, 3), bool)) & ~comp & have[sl]
+        if not rim.any():
+            held = 0.0
+        else:
+            beside = ndi.grey_dilation(np.where(comp, H[sl], -1e4), size=(3, 3))      # the piece's height next to a rim cell
+            joined = rim & (np.abs(H[sl] - beside) <= TOP_FLOATER_JOIN_M)
+            broad = joined & (H[sl] - Hop[sl] <= TOP_FLOATER_PROUD_M)
+            held = float(broad.sum()) / float(rim.sum())
+            if held < TOP_FLOATER_HELD and (joined & ~broad).any():      # the narrow thing it is joined to: how large?
+                body, _ = ndi.label(proud_all[sl] & ~comp, structure=np.ones((3, 3), bool))
+                ids = np.unique(body[joined & ~broad])
+                stand = float(np.isin(body, ids[ids > 0]).sum())
+        under = float(Sn[sl][comp].mean())
+        if held >= TOP_FLOATER_HELD or float(comp.sum()) <= TOP_FLOATER_OVER * stand or under < TOP_FLOATER_SEEN:
+            rec["pieces_kept"] += 1
+            continue
+        gone[sl] |= comp
+        ii, jj = np.nonzero(comp)
+        took.append({"m2": round(float(comp.sum()) * g * g, 2), "held": round(held, 2), "stands_on_m2": round(stand * g * g, 2),
+                     "seen_under": round(under, 2),
+                     "lowered_by_m_max": round(float((H[sl] - Hl[sl])[comp].max()), 2),
+                     "cell": [int(ii.mean()) + sl[0].start, int(jj.mean()) + sl[1].start]})
+    if not gone.any():
+        return np.asarray(h, float).copy(), rec
+    H2 = np.where(gone, Hl, H)
+    near = ndi.binary_dilation(gone, iterations=max(1, int(round(TOP_POST_NEAR_M / g)))) & have
+    posts = np.zeros(inside.shape, bool)
+    for width_m, tall_m in TOP_POSTS:                           # the narrowest first: a thin post, then a pillar
+        ks = max(3, int(round(width_m / g)) | 1)
+        Ho = opening(H2, ks)
+        post = near & (Ho > -5e3) & (H2 - Ho > tall_m)
+        H2 = np.where(post, Ho, H2)
+        posts |= post
+    took.sort(key=lambda r: -r["m2"])
+    rec.update(pieces=len(took), places=int(gone.sum()), m2=round(float(gone.sum()) * g * g, 2),
+               posts_lowered=int(posts.sum()), largest=took[:5])
+    return H2[inside], rec
+
+
+SKY_CEILING = True              # 1.0.6: the terrain is held under the mast's skyline (see pano_skyline, sky_ceiling)
+SKY_CEILING_MARGIN_DEG = 0.1    # ... this much above it at the crest (where the terrain meets the skyline) ...
+SKY_CEILING_BEHIND_DEG = 0.3    # ... and this much under it behind the crest (seen from the mast it is then hidden)
+SKY_CEILING_BEHIND_M = 0.25     # behind: farther than the crest of its azimuth by this much
+SKY_CEILING_BIN_DEG = 0.25      # the crest's range is found per this much azimuth
+SKY_CEILING_SMOOTH_DEG = 0.3    # the skyline smoothed over this much azimuth (Gaussian sigma) before it is used
+SKY_CEILING_MEDIAN_DEG = 0.5    # ... after a median over this much (a speck of sky or terrain in one column)
+SKY_CEILING_FROM_M = 3.0        # nearer than this nothing is carved (the rover's own parts, the deck, the mast's shadow)
+SKY_CEILING_MIN_EL_DEG = 0.0    # ... nor under a skyline lower than this (below the horizon a bright far slope looks like sky)
+
+
+def pano_skyline(pano: np.ndarray) -> Optional[np.ndarray]:
+    """1.0.6: the skyline of an equirectangular eye (row 0 the zenith; linear or 8-bit): per column, the elevation (deg)
+    of the highest pixel that is not sky.  The sky is what is joined to the zenith through pixels as bright as the
+    sky - brighter than midway (log) between the sky high up and the ground below the horizon - and not much redder
+    than the sky's own color in that row (the terrain is redder).  None when the eye has too little sky or ground."""
+    import cv2
+    from scipy import ndimage as ndi
+    P = np.ascontiguousarray(np.asarray(pano, np.float32)[..., :3])
+    H0, W0 = P.shape[:2]
+    W = min(W0, 8192)
+    H = max(2, int(round(H0 * W / W0)))
+    small = cv2.resize(P, (W, H), interpolation=cv2.INTER_AREA) if W != W0 else P
+    el = 90.0 - (np.arange(H) + 0.5) / H * 180.0
+    lum = np.log1p(small.mean(axis=2))
+    rb = np.log1p(small[..., 0]) - np.log1p(small[..., 2])
+    hi, lo = el >= 45.0, (el < -5.0) & (el > -40.0)
+    if not hi.any() or not lo.any():
+        return None
+    sky_l, gnd_l = float(np.median(lum[hi])), float(np.median(lum[lo]))
+    if not sky_l > gnd_l + 0.05:
+        return None
+    cut = 0.5 * (sky_l + gnd_l)
+    rb_sky = np.median(np.where(lum > cut, rb, np.nan)[el > 10.0], axis=1)        # the sky's red / blue by row
+    rb_sky = np.where(np.isfinite(rb_sky), rb_sky, float(np.nanmedian(rb_sky)) if np.isfinite(rb_sky).any() else 0.0)
+    rb_gnd = float(np.median(rb[lo]))
+    rb_cut = np.full(H, np.inf)
+    rows10 = np.flatnonzero(el > 10.0)
+    if rb_gnd > float(np.median(rb_sky)) + 0.03:                 # the sky is told from the terrain by color too
+        rb_cut[rows10] = rb_sky + 0.5 * (rb_gnd - rb_sky)
+        rb_cut[el <= 10.0] = float(rb_sky[-1]) + 0.5 * (rb_gnd - float(rb_sky[-1]))
+    cand = (lum > cut) & (rb < rb_cut[:, None]) & (el > -10.0)[:, None]
+    lab_, n = ndi.label(cand)
+    ids = np.unique(lab_[0][lab_[0] > 0])
+    if not len(ids):
+        return None
+    sky = np.isin(lab_, ids)
+    first = np.where(sky.all(axis=0), H - 1, np.argmax(~sky, axis=0))
+    sk = el[first]
+    k = max(3, int(round(SKY_CEILING_MEDIAN_DEG / 360.0 * W)) | 1)
+    sk = ndi.median_filter(sk, size=k, mode="wrap")
+    sk = ndi.gaussian_filter1d(sk, max(SKY_CEILING_SMOOTH_DEG / 360.0 * W, 0.5), mode="wrap")
+    return sk.astype(np.float64)
+
+
+class SkyCeiling:
+    """1.0.6 (Christian, 22 Nov 2026: "the white fill behind Skinner's crest" - the mesh's top surfaces behind the crest
+    stand up to a meter above the line where the frames see sky; seen from the mast they take the sky's white): free-
+    space carving from the mast.  Where the panorama shows sky in a direction, nothing solid lies along that ray.
+
+    ``skyline_deg`` per panorama column (:func:`pano_skyline`), ``azimuth0_deg`` the azimuth of column 0's left edge.
+    :meth:`limit` gives, for points (n, 3) with heights ``h`` above the pivot, the height each may have:
+
+    * at the crest of its azimuth (the nearest place where the terrain reaches the skyline's ray) and before it,
+      the ray plus ``SKY_CEILING_MARGIN_DEG``: the crest that makes the skyline stays;
+    * behind the crest (farther by ``SKY_CEILING_BEHIND_M``), ``SKY_CEILING_BEHIND_DEG`` under the ray: what the mast
+      did not see stays hidden from it - the ridge's top beyond takes the crest's colors, not the sky's;
+    * nothing nearer than ``SKY_CEILING_FROM_M``, nor under a skyline lower than ``SKY_CEILING_MIN_EL_DEG``."""
+
+    def __init__(self, skyline_deg, azimuth0_deg: float, pivot, up, north, east):
+        self.sk = np.asarray(skyline_deg, float)
+        self.az0 = float(azimuth0_deg)
+        self.P, self.u, self.n, self.e = (np.asarray(x, float) for x in (pivot, up, north, east))
+
+    def where(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(horizontal distance r, azimuth from column 0 in deg, the skyline's elevation there in deg) of points."""
+        v = np.asarray(X, float) - self.P
+        x, y = v @ self.e, v @ self.n
+        r = np.hypot(x, y)
+        az = (np.degrees(np.arctan2(x, y)) - self.az0) % 360.0
+        W = len(self.sk)
+        c = az / 360.0 * W - 0.5
+        i0 = np.floor(c).astype(np.int64)
+        f = c - i0
+        return r, az, self.sk[i0 % W] * (1.0 - f) + self.sk[(i0 + 1) % W] * f
+
+    def limit(self, X: np.ndarray, h: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+        r, az, el = self.where(X)
+        h = np.asarray(h, float)
+        use = (r >= SKY_CEILING_FROM_M) & (el >= SKY_CEILING_MIN_EL_DEG)
+        e_pt = np.degrees(np.arctan2(h, np.maximum(r, 1e-6))) - el          # the point's elevation over the skyline
+        nb = int(round(360.0 / SKY_CEILING_BIN_DEG))
+        b = np.minimum((az / 360.0 * nb).astype(np.int64), nb - 1)
+        crest = np.full(nb, np.inf)
+        touch = use & (e_pt > -0.05)
+        np.minimum.at(crest, b[touch], r[touch])
+        crest = np.minimum.reduce([np.roll(crest, k) for k in (-2, -1, 0, 1, 2)])    # (a neighbor bin's crest counts)
+        behind = r > crest[b] + SKY_CEILING_BEHIND_M
+        lim = r * np.tan(np.radians(np.clip(el + np.where(behind, -SKY_CEILING_BEHIND_DEG, SKY_CEILING_MARGIN_DEG), -80.0, 80.0)))
+        lim = np.where(use, lim, np.inf)
+        over = h > lim
+        return lim, {"cells": int(over.sum()), "behind_the_crest": int((over & behind).sum())}
+
+
+def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: int, fill: Optional[np.ndarray] = None,
+              step_m: Optional[float] = None, ceiling=None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """1.0.5 (Christian, 21 and 22 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; "Van zyl looks a lot
+    better. There are still some holes though"): the viewer's terrain as ONE sheet - the top surface of the mesh
+    (V, F), sampled straight down on a grid of ``step_m`` and simplified to ``target`` triangles.
+
+    The station's mesh is several surfaces that are not sewn: the height field near the rover, the Poisson patches on
+    its steep faces, the zones beyond, the fill and its underlay.  Simplified as they were (2.5 million triangles to
+    500,000) their rims, cracks and overlaps became the arcs, flaps and see-through holes at Van Zyl's rocks, and the
+    triangles came out one size (10 cm) from the wheels to 20 m.  A sheet with one height per place has no rims inside
+    it and no second sheet to show through; what it gives up is the underside of an overhang.
+
+    * a grid cell takes the highest surface under it; a narrow pit (a crack fell through to the sheet beneath) is
+      raised to its rim (``TOP_PIT_WIDTH_M``, ``TOP_PIT_DEPTH_M``);
+    * each cell is cut along the diagonal of the smaller height step, so a rock's edge stays straight;
+    * the triangles are simplified in a space scaled by the range (:func:`_range_warp`): small near the rover, larger
+      far off, where the texture is coarser too.
+
+    ``fill``: True for the triangles of the fill (reported only).  Returns (V, F, record)."""
+    import open3d as o3d
+    from scipy import ndimage as ndi
+    P, u = np.asarray(pivot, float), _unit(up)
+    e1 = _unit(np.cross(u, [1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.cross(u, [0.0, 1.0, 0.0]))
+    e2 = np.cross(u, e1)
+    R, g = float(radius_m), float(TOP_STEP_M if step_m is None else step_m)
+    n = int(2 * R / g) + 1
+    ax = -R + g * np.arange(n)
+    A, B = np.meshgrid(ax, ax)
+    inside = np.hypot(A, B) <= R
+    hv = (np.asarray(V, float) - P) @ u
+    top = float(hv.max()) + 5.0
+    o = P + A[inside][:, None] * e1 + B[inside][:, None] * e2 + top * u
+    rc = _raycaster(V, F)
+    t = np.empty(len(o))
+    pid = np.empty(len(o), np.int64)
+    for i in range(0, len(o), 2_000_000):
+        t[i:i + 2_000_000], pid[i:i + 2_000_000] = _cast(rc, o[i:i + 2_000_000], np.broadcast_to(-u, o[i:i + 2_000_000].shape))
+    hit = np.isfinite(t)
+    h = np.where(hit, top - t, -1e4)
+    rec: Dict[str, Any] = {"step_m": g, "cells": int(inside.sum()), "no_surface": int((~hit).sum())}
+    if fill is not None and len(fill) == len(F):
+        rec["on_fill"] = int(fill[pid[hit]].sum())
+    if TOP_FLOATERS:
+        try:
+            h, rec["floaters"] = under_floaters(rc, o - top * u, h, hit, inside, P, u, g)
+        except Exception as e:                                  # noqa: BLE001 - the top surface as it is
+            log.warning("station mesh: the floaters' check failed (%s) - the top surface as it is", e)
+    H = np.full(A.shape, -1e4, np.float32)
+    H[inside] = h
+    k = max(3, int(round(TOP_PIT_WIDTH_M / g)) | 1)
+    Hc = ndi.grey_closing(H, size=(k, k))
+    pit = (Hc - H > TOP_PIT_DEPTH_M) & (H > -5e3)
+    H = np.where(pit, Hc, H)
+    rec["pits_raised"] = int(pit.sum())
+    if ceiling is not None:                                     # 1.0.6: under the mast's skyline (SkyCeiling)
+        try:
+            ok_ = inside & (H > -5e3)
+            top_h = np.full(A.shape, np.inf)
+            top_h[ok_], info = ceiling.limit(P + A[ok_][:, None] * e1 + B[ok_][:, None] * e2, H[ok_])
+            over = ok_ & (H > top_h)
+            dh = (H - top_h)[over]
+            H = np.where(over, top_h, H).astype(np.float32)
+            rec["sky_ceiling"] = {"cells": int(over.sum()), "m2": round(float(over.sum()) * g * g, 2),
+                                  "behind_the_crest_m2": round(info["behind_the_crest"] * g * g, 2),
+                                  "lowered_by_m_median": round(float(np.median(dh)), 3) if len(dh) else 0.0,
+                                  "lowered_by_m_max": round(float(dh.max()), 3) if len(dh) else 0.0,
+                                  "margin_deg": SKY_CEILING_MARGIN_DEG, "behind_deg": SKY_CEILING_BEHIND_DEG,
+                                  "from_m": SKY_CEILING_FROM_M}
+        except Exception as e:                                  # noqa: BLE001 - the sheet as it is
+            log.warning("station mesh: the sky ceiling was not applied (%s)", e)
+    ok = inside & (H > -5e3)
+    idx = np.full(A.shape, -1, np.int64)
+    idx[ok] = np.arange(int(ok.sum()))
+    Vn = P + A[ok][:, None] * e1 + B[ok][:, None] * e2 + H[ok].astype(float)[:, None] * u
+    a_, b_, c_, d_ = idx[:-1, :-1], idx[:-1, 1:], idx[1:, :-1], idx[1:, 1:]
+    q = (a_ >= 0) & (b_ >= 0) & (c_ >= 0) & (d_ >= 0)
+    dg = np.abs(H[:-1, :-1] - H[1:, 1:]) <= np.abs(H[:-1, 1:] - H[1:, :-1])
+    q1, q2 = q & dg, q & ~dg
+    Fn = np.concatenate([np.stack([a_[q1], d_[q1], c_[q1]], 1), np.stack([a_[q1], b_[q1], d_[q1]], 1),
+                         np.stack([a_[q2], b_[q2], c_[q2]], 1), np.stack([b_[q2], d_[q2], c_[q2]], 1)])
+    if float(np.cross(e1, e2) @ u) < 0:                         # the winding's normals up
+        Fn = Fn[:, ::-1]
+    rec["grid_triangles"] = int(len(Fn))
+    # the rocks by the rover (Christian, 22 Nov 2026: "Make sure not to simply the rocks in front of the rover too
+    # much"): the grid's own heights where the ground is rough within TOP_ROCKS_TO_M - the simplified sheet is held to
+    # them, with more triangles when it strays
+    rough = (ndi.maximum_filter(np.where(ok, H, -1e4), size=max(3, int(round(0.25 / g)) | 1))
+             - ndi.minimum_filter(np.where(ok, H, 1e4), size=max(3, int(round(0.25 / g)) | 1))) > TOP_ROCK_RELIEF_M
+    rock = ok & rough & (np.hypot(A, B) <= TOP_ROCKS_TO_M)
+    rk = np.flatnonzero(rock.ravel())
+    if len(rk) > 60000:
+        rk = rk[:: len(rk) // 60000 + 1]
+    Vg, Fg, goal = Vn, Fn, int(target)
+    for attempt in range(3):
+        Vn, Fn, rec["passes"] = simplify_in_steps(Vg, Fg, goal, P, u)
+        if not len(rk):
+            break
+        pts2 = P + A.ravel()[rk][:, None] * e1 + B.ravel()[rk][:, None] * e2 + H.ravel()[rk].astype(float)[:, None] * u
+        err = _raycaster(Vn, Fn).compute_distance(o3d.core.Tensor(np.ascontiguousarray(pts2, np.float32))).numpy().astype(float)
+        err = err[np.isfinite(err)]                             # (the distance to the sheet: a wall moved sideways by a
+        #                                                         centimeter is a centimeter off, not its height)
+        if not len(err):
+            break
+        rec["near_rocks"] = {"within_m": TOP_ROCKS_TO_M, "places": int(len(err)), "p95_mm": round(1000 * float(np.percentile(err, 95)), 2),
+                             "p99_mm": round(1000 * float(np.percentile(err, 99)), 2), "max_mm": round(1000 * float(err.max()), 1),
+                             "limit_p95_mm": TOP_ROCK_P95_MM, "triangles": int(len(Fn))}
+        if rec["near_rocks"]["p95_mm"] <= TOP_ROCK_P95_MM or attempt == 2 or len(Fg) <= goal:
+            break
+        goal = int(goal * TOP_ROCK_MORE)
+        log.info("station mesh: the rocks by the rover are %.1f mm off at 95 %% of places (limit %.1f) - simplified again to %d triangles",
+                 rec["near_rocks"]["p95_mm"], TOP_ROCK_P95_MM, goal)
+    rec.update(triangles=int(len(Fn)), near_m=TOP_NEAR_M, range_power=TOP_RANGE_POWER)
+    return Vn, np.asarray(Fn, np.int64), rec
+
+
+def repair_sheet(V: np.ndarray, F: np.ndarray, pivot, up) -> Tuple[np.ndarray, np.ndarray, Dict[str, int]]:
+    """A simplified sheet put right before it is simplified further: triangles without area, repeated triangles and
+    vertices and edges of more than two triangles are removed; a triangle folded over (its normal turned down) is
+    smoothed out - its corners moved to the mean of their neighbors - and dropped if it stays folded, and the small
+    holes these leave are closed with a fan.  Returns (V, F, counts)."""
+    import open3d as o3d
+    from .mesh import close_small_loops
+    n0 = len(F)
+    m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(np.asarray(V, float)), o3d.utility.Vector3iVector(np.asarray(F, np.int32)))
+    m.remove_degenerate_triangles()
+    m.remove_duplicated_triangles()
+    m.remove_duplicated_vertices()
+    m.remove_non_manifold_edges()
+    V2, F2 = np.asarray(m.vertices).copy(), np.asarray(m.triangles).astype(np.int64)
+    removed = n0 - len(F2)
+    u = _unit(up)
+    fold = (triangle_normals(V2, F2)[0] @ u) <= 0.0
+    folded = int(fold.sum())
+    if folded:                                                   # a fold is first smoothed out: its corners to the
+        from scipy.sparse import coo_matrix                      # mean of their neighbors (a few rounds) ...
+        E = np.concatenate([F2[:, [0, 1]], F2[:, [1, 2]], F2[:, [2, 0]]])
+        nv = np.int64(len(V2))
+        ke = np.unique(np.concatenate([E[:, 0] * nv + E[:, 1], E[:, 1] * nv + E[:, 0]]))      # each neighbor once
+        A = coo_matrix((np.ones(len(ke)), (ke // nv, ke % nv)), shape=(len(V2), len(V2))).tocsr()
+        deg = np.maximum(np.asarray(A.sum(axis=1)).ravel(), 1.0)
+        rim = np.zeros(len(V2), bool)                            # (the sheet's own edge stays where it is)
+        kb, cb = np.unique(np.minimum(E[:, 0], E[:, 1]) * nv + np.maximum(E[:, 0], E[:, 1]), return_counts=True)
+        rim[kb[cb == 1] // nv] = True
+        rim[kb[cb == 1] % nv] = True
+        for _ in range(REPAIR_SMOOTH_ROUNDS):
+            mv = np.unique(F2[fold])
+            mv = mv[~rim[mv]]
+            if not len(mv):
+                break
+            V2[mv] = (A[mv] @ V2) / deg[mv][:, None]
+            fold = (triangle_normals(V2, F2)[0] @ u) <= 0.0
+            if not fold.any():
+                break
+    F2 = F2[~fold]                                               # ... and what is still folded is dropped
+    V3, Fc, loops = close_small_loops(V2, F2, np.asarray(pivot, float), max_edges=REPAIR_LOOP_EDGES, max_diameter_m=REPAIR_LOOP_M)
+    if len(Fc):
+        F2 = np.vstack([F2, Fc])
+    used = np.zeros(len(V3), bool)
+    used[F2.ravel()] = True
+    remap = np.cumsum(used) - 1
+    return V3[used], remap[F2], {"removed": int(removed), "folded": folded, "folds_dropped": int(fold.sum()), "holes_closed": int(loops)}
+
+
+REPAIR_SMOOTH_ROUNDS = 5        # rounds of moving a fold's corners to the mean of their neighbors
+REPAIR_LOOP_EDGES = 60          # a hole the repair closes: at most this many edges ...
+REPAIR_LOOP_M = 0.5             # ... and this wide (x (1 + range / 10 m))
+SIMPLIFY_STEP = 0.5             # 1.0.5: each pass keeps this share of the triangles, then the sheet is repaired
+
+
+def simplify_in_steps(V: np.ndarray, F: np.ndarray, target: int, pivot, up, step: float = SIMPLIFY_STEP
+                      ) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, int]]]:
+    """1.0.5 (Christian, 22 Nov 2026: "The simplification should simplify iteratively, reducing polygon count by ~50%
+    repairing the mesh, then repeat until target poly count is met"): the sheet (V, F) simplified to ``target``
+    triangles in passes that each keep ``step`` of the triangles (the last one what is left to the target); after
+    every pass the sheet is repaired (:func:`repair_sheet`), so a fold or a hole is put right while it is one triangle
+    and is not built upon.  Each pass works in the space scaled by the range (:func:`_range_warp`).  Returns
+    (V, F, one record per pass)."""
+    import open3d as o3d
+    P = np.asarray(pivot, float)
+    V, F = np.asarray(V, float), np.asarray(F, np.int64)
+    passes: List[Dict[str, int]] = []
+    target = int(target)
+    while len(F) > target and len(passes) < 16:
+        goal = int(len(F) * float(step))
+        if goal <= target:                                       # the last pass: room for the repair's fans
+            goal = int(target * (0.99 if not passes or passes[-1]["from"] > target * 1.02 else 0.97))
+        m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(_range_warp(V, P)), o3d.utility.Vector3iVector(F.astype(np.int32)))
+        m = m.simplify_quadric_decimation(target_number_of_triangles=max(goal, 4))
+        n_in = len(F)
+        V, F, fix = repair_sheet(_range_warp(np.asarray(m.vertices), P, back=True), np.asarray(m.triangles), P, up)
+        passes.append(dict({"from": int(n_in), "to": int(len(F))}, **fix))
+        if len(F) >= n_in:                                       # nothing went: no further pass would do better
+            break
+    return V, F, passes
+
+
+def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TARGET_TRIANGLES, ceiling=None,
+                 ceiling_key=None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """(V, F, record) of the scene's mesh within ``radius_m`` of the mast axis, without the rover model, simplified:
+    as one sheet (1.0.5, :func:`top_sheet`), or - ``TOP_SHEET`` off, or the sheet failed - its triangles simplified."""
     from .mesh import decimate_and_smooth, horizontal_distance, keep_triangles
     V, F = np.asarray(scene.mesh_V, float), np.asarray(scene.mesh_F, np.int64)
     keep = np.ones(len(F), bool)
@@ -147,6 +623,34 @@ def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TAR
     keep &= near[F].all(axis=1)
     if not keep.any():
         raise ValueError(f"station mesh: no terrain within {radius_m:g} m of the mast axis")
+    if TOP_SHEET:
+        try:
+            tt = getattr(scene, "terrain_triangles", None)
+            fill = None
+            if tt is not None:
+                fill = np.ones(len(F), bool)
+                fill[tt[0]:tt[1]] = False
+            wide = horizontal_distance(V, pivot, up) <= float(radius_m) + 0.5      # the sheet's rim has ground under it
+            kw = wide[F].any(axis=1)
+            if rt is not None:
+                kw[rt[0]:rt[1]] = False
+            key = (float(radius_m), int(target), TOP_STEP_M, TOP_RANGE_POWER, tuple(np.round(np.asarray(pivot, float), 6)),
+                   ceiling_key)
+            cache = getattr(scene, "_top_sheet", None)
+            if cache is not None and cache[0] == key:           # the terrain and the scape parts ask for the same sheet
+                Vt, Ft, top = cache[1]
+            else:
+                Vt, Ft, top = top_sheet(V, F[kw], pivot, up, radius_m, target, fill=None if fill is None else fill[kw],
+                                        ceiling=ceiling)
+                try:
+                    scene._top_sheet = (key, (Vt, Ft, top))
+                except Exception:                               # noqa: BLE001 - a scene that takes no attribute
+                    pass
+            if len(Ft):
+                return Vt, Ft, {"triangles_within_radius": int(keep.sum()), "triangles": int(len(Ft)),
+                                "radius_m": float(radius_m), "top_sheet": top}
+        except Exception as e:                                  # noqa: BLE001 - the mesh's own triangles, as before 1.0.5
+            log.warning("station mesh: the one-sheet terrain failed (%s) - the mesh's triangles are simplified instead", e)
     V2, F2 = keep_triangles(V, F, keep)
     n0 = len(F2)
     V2, F2, rep = decimate_and_smooth(V2, F2, target_triangles=int(target), taubin_iterations=0)
@@ -181,6 +685,18 @@ def test_points(V: np.ndarray, F: np.ndarray, shrink: float = 0.25) -> np.ndarra
     tri = V[F]
     cen = tri.mean(axis=1)
     return np.concatenate([cen[:, None], tri + shrink * (cen[:, None] - tri)], axis=1)
+
+
+UNDER_SHEET_M = 0.35            # 1.0.2: a triangle with the mesh this near straight above it lies under another sheet
+
+
+def under_a_sheet(rc, pts: np.ndarray, up, max_m: float = UNDER_SHEET_M, off_m: float = 0.003) -> np.ndarray:
+    """1.0.2: True where the mesh in ``rc`` lies within ``max_m`` straight above each point (k, 3) - the fill's
+    underlay beneath the measured surface, the patch under the rover where the two overlap."""
+    u = _unit(up)
+    o = np.asarray(pts, float) + off_m * u
+    t, _ = _cast(rc, o, np.broadcast_to(u, o.shape))
+    return t < float(max_m)
 
 
 def seen_from(rc, pts: np.ndarray, viewpoint: np.ndarray, tol_rel: float = 2e-3, tol_m: float = 2e-3) -> np.ndarray:
@@ -407,8 +923,19 @@ def texture_rows(scene, sources: Sequence[Any], args: Dict[str, Any], r0: int, r
         o, d = np.concatenate(O).astype(float), np.concatenate(D).astype(float)
         fam = args.get("families")
         srcs = [s for s in sources if s.name[:1] in fam] if fam else list(sources)
+        fallback = bool(args.get("rover_fallback"))
+        if fallback:                                             # 1.0.5: the station's own frames only (see rover_part)
+            srcs = [s for s in srcs if not (getattr(s, "context", False) or getattr(s, "no_rover", False)
+                                            or getattr(s, "fill_only", False))]
         if len(idx) and srcs:
-            res = shade_rays(scene, srcs, o, d, up=args.get("up", (0, 0, 1)), linear=linear)
+            from . import ods as _ods
+            keep_check = _ods.SURFACE_CHECK
+            try:
+                if fallback:                                     # ... without the rover mask's say
+                    _ods.SURFACE_CHECK = False
+                res = shade_rays(scene, srcs, o, d, up=args.get("up", (0, 0, 1)), linear=linear)
+            finally:
+                _ods.SURFACE_CHECK = keep_check
             for k in BAND_FIELDS:
                 band[k][idx] = res[k]
             band["rejected"] = res["rejected"]
@@ -496,6 +1023,9 @@ def sky_texels(rgb: np.ndarray, far: np.ndarray, have: np.ndarray, in_disc: np.n
 # is not sky (the mesh, or a far hill), median filtered over SKYLINE_MEDIAN_BINS: above it every far texel is white,
 # below it none is, and a far texel below it that was taken for sky takes the colors of the hills around it
 SKYLINE_ONE = True
+SKY_IMAGED = True                # 1.0.1: the sky as the frames show it (the panorama's own), not white - see smooth_sky
+SKY_FEATHER_DEG = 1.5            # ... sharp to smoothed over this below the skyline's circle
+SKY_SMOOTH_DEG = 3.0             # ... the Gaussian mean above it (the panoramas' enhanced views smooth their sky by 3 deg too)
 SKYLINE_BIN_DEG = 0.25
 SKYLINE_MEDIAN_BINS = 9          # 2.25 deg
 SKYLINE_LOW_EL_DEG = -5.0        # the skyline is looked for above this elevation
@@ -535,6 +1065,139 @@ def one_skyline(rgb: np.ndarray, sky: np.ndarray, far: np.ndarray, have: np.ndar
     return new
 
 
+def pano_sky(pano: np.ndarray, azimuth0_deg: float, d: np.ndarray, up, north, east) -> np.ndarray:
+    """1.0.2: the colors (n, 3) an equirectangular eye ``pano`` (row 0 the zenith, the left edge of column 0 at
+    ``azimuth0_deg`` east of north) shows along the unit directions ``d`` (n, 3) - bilinear, wrapped in azimuth."""
+    u, n_, e = _unit(up), _unit(north), _unit(east)
+    H, W = pano.shape[:2]
+    el = np.degrees(np.arcsin(np.clip(d @ u, -1.0, 1.0)))
+    az = np.degrees(np.arctan2(d @ e, d @ n_))
+    x = ((az - float(azimuth0_deg)) / 360.0 % 1.0) * W - 0.5
+    y = np.clip((90.0 - el) / 180.0 * H - 0.5, 0.0, H - 1.0)
+    x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+    xa, xb = x0 % W, (x0 + 1) % W
+    ya, yb = y0, np.minimum(y0 + 1, H - 1)
+    P = np.asarray(pano, np.float32)
+    return (P[ya, xa, :3] * (1 - fx) + P[ya, xb, :3] * fx) * (1 - fy) + (P[yb, xa, :3] * (1 - fx) + P[yb, xb, :3] * fx) * fy
+
+
+SKY_MODEL = True                # 1.0.5: above the skyline's circle the sky is a model of the panorama's (see sky_model)
+SKY_MODEL_OUTLIER = 0.2         # a sky pixel this far (relative) from its row's median brightness is left out
+SKY_MODEL_FADE_DEG = 12.0       # the sky's own color along the circle fades into the rows' color over this elevation
+
+
+def sky_model(pano: np.ndarray, circle_el_deg: float) -> np.ndarray:
+    """1.0.5 (Christian, 22 Nov 2026, Rockytop in the headset: "the top pole has artifacts in the sky" - a dark red
+    patch by the zenith where the panorama has no sky of its own; Wildcat Ridge: a violet oval over the ridge, the
+    sky the frames show beside the white the panorama fills in): the panorama's sky above ``circle_el_deg`` as a
+    smooth model, (180, 360, 3) at one degree per pixel in the panorama's layout.
+
+    * every degree of elevation has ONE color: the median of its pixels over all azimuths, without those that are
+      empty or more than ``SKY_MODEL_OUTLIER`` off the row's brightness; a row with too few takes the row beneath;
+    * along the circle the sky keeps the color the panorama has there in each direction (smoothed over azimuth), so
+      it meets the imaged sky below the circle without a step, and that difference fades out over
+      ``SKY_MODEL_FADE_DEG`` above it."""
+    import cv2
+    from scipy import ndimage as ndi
+    P = np.ascontiguousarray(np.asarray(pano, np.float32)[..., :3])
+    small = cv2.resize(P, (360, 180), interpolation=cv2.INTER_AREA).astype(np.float64)
+    lum = small.sum(axis=2)
+    ec = int(np.clip(round(90.0 - float(circle_el_deg)), 2, 178))        # the circle's row (row 0: the zenith)
+    prof = np.full((180, 3), np.nan)
+    for r in range(0, ec + 3):
+        v = lum[r] > 0
+        if v.sum() < 30:
+            continue
+        med = np.median(lum[r][v])
+        inl = v & (np.abs(lum[r] - med) <= SKY_MODEL_OUTLIER * med)
+        if inl.sum() >= 30:
+            prof[r] = np.median(small[r][inl], axis=0)
+    have = np.flatnonzero(np.isfinite(prof[:, 0]))
+    if not len(have):
+        raise ValueError("the panorama has no sky above the skyline's circle")
+    for r in range(ec + 2, -1, -1):                              # an empty row: the row beneath it (toward the circle)
+        if not np.isfinite(prof[r, 0]):
+            below = have[have > r]
+            prof[r] = prof[below.min()] if len(below) else prof[have.max()]
+    prof[: ec + 3] = ndi.uniform_filter1d(prof[: ec + 3], size=5, axis=0, mode="nearest")
+    # the sky's own color along the circle, by azimuth: a robust band just above it, smoothed around the compass
+    band = small[max(ec - 3, 0): ec + 1]
+    anchor = np.median(band, axis=0)                             # (360, 3)
+    ref = prof[max(ec - 1, 0)]
+    okc = (anchor.sum(axis=1) > 0) & (np.abs(anchor.sum(axis=1) - ref.sum()) <= 2 * SKY_MODEL_OUTLIER * ref.sum())
+    delta = np.where(okc[:, None], anchor - ref, 0.0)
+    wgt = ndi.gaussian_filter1d(okc.astype(float), 8.0, mode="wrap")
+    delta = ndi.gaussian_filter1d(delta, 8.0, axis=0, mode="wrap") / np.maximum(wgt, 1e-3)[:, None] * (wgt > 0.05)[:, None]
+    out = np.repeat(prof[:, None, :], 360, axis=1)
+    rows = np.arange(180)
+    fade = np.exp(-np.clip(ec - rows, 0, None) / float(SKY_MODEL_FADE_DEG))
+    out += delta[None, :, :] * fade[:, None, None]
+    return np.maximum(out, 0.0).astype(np.float32)
+
+
+def smooth_sky(rgb: np.ndarray, far: np.ndarray, size: int, rpx: float, knee, feather_deg: float = SKY_FEATHER_DEG,
+               sigma_deg: float = SKY_SMOOTH_DEG, pano=None, frame=None) -> int:
+    """1.0.1 (Christian, 21 Nov 2026: "use the panoramas own sky instead of white. Make sure that artifacts above the sky
+    line are smoothed out"): the far texels (``far``: the sky and the hills beyond the mesh, colored by the frames or
+    filled from them) keep their colors below the skyline's circle - the hills, as in the panorama - and above it are
+    the far texels' own Gaussian mean (``sigma_deg`` at the circle's texel scale), which takes out the frames' edges
+    and blemishes; the two are mixed over ``feather_deg`` below the circle.  ``rgb`` float in place.  Returns the
+    texels changed.
+
+    ``pano`` = (an eye of the station's panorama, linear, in the texture's units; its azimuth0_deg) with ``frame`` =
+    (up, north, east): above the circle the texels take the PANORAMA'S sky in their direction, not the mean
+    (Christian, 21 Nov 2026: "fix the streaks in the full-3d. it isn't an issue in the ods" - the panorama's sky is one
+    smooth fit; the texture's own far texels, filled column by column where no frame saw the sky, ran as streaks to
+    the zenith, tens of degrees wide - wider than any mean of a few degrees)."""
+    import cv2
+    if not knee or not far.any():
+        return 0
+    tk = float(knee[0])
+    r1 = float(knee[1]) * rpx
+    r0 = float(_rho_of_theta(np.array([tk - np.radians(feather_deg)]), rpx, np.pi, knee)[0])
+    if not r1 > r0:
+        return 0
+    k = max(1, int(round(size / 1024.0)))                      # the mean at about 1024 px: the sky has no detail to keep
+    n = size // k
+    w = cv2.resize(far.astype(np.float32), (n, n), interpolation=cv2.INTER_AREA)
+    px_per_deg = (r1 / max(np.degrees(tk), 1e-6)) / k
+    sig = float(max(sigma_deg * px_per_deg, 2.0))
+    wb = cv2.GaussianBlur(w, (0, 0), sig)
+    ys, xs = np.nonzero(far)
+    c = size / 2.0
+    rho = np.hypot(xs + 0.5 - c, c - (ys + 0.5))
+    t = np.clip((rho - r0) / (r1 - r0), 0.0, 1.0).astype(np.float32)
+    m = t > 0
+    if not m.any():
+        return 0
+    ys, xs, t = ys[m], xs[m], t[m]
+    t = t * t * (3.0 - 2.0 * t)                                 # smoothstep
+    if pano is not None and frame is not None:
+        try:
+            d, _ = disc_dirs(ys, xs, size, rpx, np.pi, frame[0], frame[1], frame[2], knee=knee)
+            src = pano[0]
+            if SKY_MODEL:                                        # 1.0.5: not the panorama's pixels - a model of its sky
+                try:
+                    src = sky_model(pano[0], float(np.degrees(tk)) - 90.0)
+                except Exception as e:                           # noqa: BLE001 - the panorama's own pixels
+                    log.warning("station mesh: no model of the panorama's sky (%s) - its own pixels", e)
+            col = pano_sky(src, float(pano[1]), np.asarray(d, float), *frame)
+            ok = np.isfinite(col).all(axis=1) & (col.max(axis=1) > 0)
+            t = np.where(ok, t, 0.0).astype(np.float32)          # where the panorama has nothing, the texel stays
+            rgb[ys, xs] = rgb[ys, xs] * (1.0 - t[:, None]) + np.nan_to_num(col).astype(np.float32) * t[:, None]
+            return int((t > 0).sum())
+        except Exception as e:                                   # noqa: BLE001 - then the mean, as before
+            log.warning("station mesh: the panorama's sky was not used (%s: %s) - the far texels' mean instead", type(e).__name__, e)
+    gx, gy = np.clip(xs // k, 0, n - 1), np.clip(ys // k, 0, n - 1)
+    den = np.maximum(wb[gy, gx], 1e-6)
+    for ch in range(3):
+        a = cv2.resize(np.where(far, rgb[..., ch], 0.0).astype(np.float32), (n, n), interpolation=cv2.INTER_AREA)
+        mean = cv2.GaussianBlur(a, (0, 0), sig)[gy, gx] / den
+        rgb[ys, xs, ch] = rgb[ys, xs, ch] * (1.0 - t) + mean * t
+    return int(len(ys))
+
+
 def push_pull(rgb: np.ndarray, have: np.ndarray, region: np.ndarray) -> np.ndarray:
     """The texels of ``region`` that are not ``have`` filled from the ones that are, coarse to fine (a pull-push
     pyramid); ``rgb`` float (H, W, 3) changed in place.  Returns the texels filled."""
@@ -572,6 +1235,84 @@ def fill_cells(rgb: np.ndarray, have: np.ndarray, cells: Dict[str, Any], default
         blk = rgb[sl]
         blk[~hv] = col
         n += int((~hv).sum())
+    return n
+
+
+GROW_COLORS = True              # 1.0.5: a cell's texels no frame colored take colors grown in from the patch's seen edges
+
+
+def _bilinear(rgb: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """``rgb`` (H, W, 3) at the texel coordinates (x, y) of texel centers (x + 0.5 is a center), bilinear."""
+    H, W = rgb.shape[:2]
+    x = np.clip(np.asarray(x, float) - 0.5, 0, W - 1.001)
+    y = np.clip(np.asarray(y, float) - 0.5, 0, H - 1.001)
+    x0, y0 = x.astype(np.int64), y.astype(np.int64)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+    return ((1 - fy) * ((1 - fx) * rgb[y0, x0] + fx * rgb[y0, x0 + 1])
+            + fy * ((1 - fx) * rgb[y0 + 1, x0] + fx * rgb[y0 + 1, x0 + 1]))
+
+
+def grown_vertex_colors(F: np.ndarray, vis: np.ndarray, color: np.ndarray, default: Sequence[float]) -> np.ndarray:
+    """Colors (n, 3) for all the vertices: ``color`` at the vertices of the visible triangles (``vis``), and over the
+    hidden triangles' other vertices the harmonic interpolation of those - every free vertex the mean of its
+    neighbors along the hidden triangles' edges.  A patch that touches no visible triangle takes ``default``."""
+    from scipy.sparse import coo_matrix, identity
+    from scipy.sparse.linalg import spsolve
+    n = len(color)
+    out = np.asarray(color, np.float64).copy()
+    fixed = np.zeros(n, bool)
+    fixed[np.unique(F[vis])] = True
+    Fh = F[~vis]
+    free = np.unique(Fh)
+    free = free[~fixed[free]]
+    if not len(free):
+        return out
+    idx = np.full(n, -1, np.int64)
+    idx[free] = np.arange(len(free))
+    E = np.concatenate([Fh[:, [0, 1]], Fh[:, [1, 2]], Fh[:, [2, 0]]]).astype(np.int64)
+    ke = np.unique(np.concatenate([E[:, 0] * np.int64(n) + E[:, 1], E[:, 1] * np.int64(n) + E[:, 0]]))    # each neighbor once
+    E = np.stack([ke // n, ke % n], axis=1)
+    E = E[idx[E[:, 0]] >= 0]
+    to_free = idx[E[:, 1]] >= 0
+    m = len(free)
+    eps = 1e-4                                                  # a weak pull to the default: an island has a solution
+    deg = np.bincount(idx[E[:, 0]], minlength=m).astype(np.float64)
+    A = (coo_matrix((np.r_[deg, -np.ones(int(to_free.sum()))],
+                     (np.r_[np.arange(m), idx[E[to_free, 0]]], np.r_[np.arange(m), idx[E[to_free, 1]]])), shape=(m, m)).tocsc()
+         + eps * identity(m, format="csc"))
+    b = eps * np.tile(np.asarray(default, np.float64), (m, 1))
+    np.add.at(b, idx[E[~to_free, 0]], out[E[~to_free, 1]])
+    out[free] = np.stack([spsolve(A, b[:, k]) for k in range(3)], axis=1)
+    return out
+
+
+def grow_cells(rgb: np.ndarray, have: np.ndarray, cells: Dict[str, Any], corner_colors: np.ndarray) -> int:
+    """1.0.5 (Christian, 21 Nov 2026, Van Zyl: flat, jagged shards on the ground behind rocks): a cell's texels no
+    frame colored take the color interpolated between its triangle's corners (``corner_colors`` (m, 3, 3), from
+    :func:`grown_vertex_colors`), not one flat color per cell - neighboring hidden triangles then agree along their
+    shared edges and with the seen surface around the patch.  Returns the texels colored."""
+    n = 0
+    size = rgb.shape[0]
+    for k, ((x, y), (w, h)) in enumerate(zip(cells["pos"], cells["wh"])):
+        sl = (slice(int(y), int(y + h)), slice(int(x), int(x + w)))
+        hv = have[sl]
+        if hv.all():
+            continue
+        p = cells["uv"][k] * size                               # the corners in texels
+        d = (p[1, 1] - p[2, 1]) * (p[0, 0] - p[2, 0]) + (p[2, 0] - p[1, 0]) * (p[0, 1] - p[2, 1])
+        yy, xx = np.nonzero(~hv)
+        if abs(d) < 1e-9:
+            col = corner_colors[k].mean(axis=0)[None]
+        else:
+            px, py = xx + int(x) + 0.5, yy + int(y) + 0.5
+            w0 = ((p[1, 1] - p[2, 1]) * (px - p[2, 0]) + (p[2, 0] - p[1, 0]) * (py - p[2, 1])) / d
+            w1 = ((p[2, 1] - p[0, 1]) * (px - p[2, 0]) + (p[0, 0] - p[2, 0]) * (py - p[2, 1])) / d
+            wgt = np.clip(np.stack([w0, w1, 1.0 - w0 - w1], 1), 0.0, 1.0)      # the gutter: the nearest of the triangle
+            wgt /= np.maximum(wgt.sum(1), 1e-9)[:, None]
+            col = wgt @ corner_colors[k]
+        blk = rgb[sl]
+        blk[yy, xx] = col.astype(rgb.dtype)
+        n += len(yy)
     return n
 
 
@@ -720,13 +1461,14 @@ def layout_charts(V: np.ndarray, F: np.ndarray, normals: np.ndarray, areas: np.n
         lo.append(p.reshape(-1, 2).min(axis=0))
         ext.append(p.reshape(-1, 2).max(axis=0) - lo[-1])
     lo, ext = np.nan_to_num(np.asarray(lo)), np.nan_to_num(np.asarray(ext), nan=0.0, posinf=0.0, neginf=0.0)
-    g = GUTTER_PX
+    g = GUTTER_PX * max(1, int(size) // ROVER_GLB_PX)            # 1.0.1: GUTTER_PX texels are left in the reduced .glb texture
+    mcp = MAX_CHART_PX * max(1, int(size) // ROVER_GLB_PX)
     free = size * size - sum(r[2] * r[3] for r in reserved)
     t = float(np.sqrt(max(1.3 * float((ext[:, 0] * ext[:, 1]).sum()), 1e-12) / max(fill * free, 1.0)))
     for _ in range(80):
         s = np.full(len(charts), t)
-        big = ext.max(axis=1) / s > (MAX_CHART_PX - 2 * g)
-        s[big] = ext[big].max(axis=1) / (MAX_CHART_PX - 2 * g)
+        big = ext.max(axis=1) / s > (mcp - 2 * g)
+        s[big] = ext[big].max(axis=1) / (mcp - 2 * g)
         wh = np.ceil(ext / s[:, None]).astype(np.int64) + 1 + 2 * g
         pos = shelf_pack(wh, size, None, reserved)
         if pos is not None:
@@ -799,7 +1541,7 @@ def fill_charts(rgb: np.ndarray, have: np.ndarray, cells: Dict[str, Any], defaul
 # ------------------------------------------------------------------------------------------- to the horizon (0.99.32)
 def horizon_shell(scene, C, pivot, up, north, east, from_m: float = SHELL_FROM_M, az_step_deg: float = SHELL_AZ_STEP_DEG,
                   step_deg: float = SHELL_STEP_DEG, sky_rings: int = SHELL_SKY_RINGS, dome_m: float = DOME_M,
-                  margin_deg: float = SKYLINE_MARGIN_DEG) -> Dict[str, Any]:
+                  margin_deg: float = SKYLINE_MARGIN_DEG, near=None) -> Dict[str, Any]:
     """The surface seen from C beyond the near terrain, as one sheet: on rings of equal angle from straight down, a
     vertex per ``az_step_deg`` where its ray from C meets the scene (the mesh, the ground plane, the far surface -
     the sky sphere or the far field, which also carries the sky) or, where it meets nothing, at ``dome_m``.  The
@@ -807,21 +1549,60 @@ def horizon_shell(scene, C, pivot, up, north, east, from_m: float = SHELL_FROM_M
     or the plane plus ``margin_deg``, at least ``SKYLINE_MIN_DEG`` above the horizontal) every ``step_deg``, then
     ``sky_rings`` more to the zenith.  Seen from C the sheet has no fold; its parallax for a head off C is the true one out to the far
     field and none on the sky.  Returns {"V" (n, 3), "F" (m, 3) - the outer rings first, so a viewer that draws them
-    in order without a depth buffer draws the near ones over the far ones -, "knee" rad, "theta0" rad, "rings", "az"}."""
-    from .raycast import LABEL_FAR, LABEL_NONE, SKY_RANGE_M
+    in order without a depth buffer draws the near ones over the far ones -, "knee" rad, "theta0" rad, "rings", "az"}.
+
+    ``near`` (1.0.5) = (a raycaster of the near terrain AS IT IS DRAWN, its radius about the mast axis): the scene's
+    mesh can hold what the drawn terrain does not - a floater that :func:`under_floaters` took out (Wildcat Ridge:
+    a sheet 6 m out at the mast's height).  A ray that met it was "near terrain" to the shell, the terrain drew
+    nothing there, and the place was black.  With ``near`` a ray is followed to what IS drawn: where it meets the
+    scene before the drawn terrain (by more than ``SHELL_NEAR_TOL_M``) the vertex is on the drawn terrain; where it
+    meets the scene inside the radius and never the drawn terrain, it is cast again from where it leaves the radius."""
+    from .raycast import LABEL_FAR, LABEL_MESH, LABEL_NONE, SKY_RANGE_M
     C, up, north, east = np.asarray(C, float), _unit(up), _unit(north), _unit(east)
 
     def cast(th, ph):
         s = np.sin(th)
         d = np.cos(th)[:, None] * -up + (s * np.sin(ph))[:, None] * east + (s * np.cos(ph))[:, None] * north
-        h = scene.cast(np.broadcast_to(C, d.shape).copy(), d)
-        t = np.asarray(h["t"], float)
-        open_ = (h["label"] == LABEL_NONE) | ~np.isfinite(t) | (t >= dome_m)       # nothing there: the dome
-        return d, np.where(open_, dome_m, t), open_ | (h["label"] == LABEL_FAR)   # ..., beyond the mesh and the plane
+        o = np.broadcast_to(C, d.shape).copy()
+        h = scene.cast(o, d)
+        t = np.asarray(h["t"], float).copy()
+        label = np.asarray(h["label"]).copy()
+        if near is not None:                                     # 1.0.5: to what the near terrain draws, or past it
+            rc_t, rad = near[0], float(near[1])
+            tt, _ = _cast(rc_t, o, d)
+            hit = np.isfinite(t) & (label != LABEL_NONE)
+            inside = hit & (t * s < rad - 1e-3)                  # (s: the ray's horizontal share - C is on the mast axis)
+            before = inside & np.isfinite(tt) & (t < tt - SHELL_NEAR_TOL_M)
+            t[before] = tt[before]
+            label[before] = LABEL_MESH
+            past = inside & ~np.isfinite(tt)
+            if past.any():
+                out_at = rad / np.maximum(s[past], 1e-9) + 0.01
+                h2 = scene.cast(C + d[past] * out_at[:, None], d[past])
+                t2 = np.asarray(h2["t"], float)
+                t[past] = np.where(np.isfinite(t2), out_at + t2, np.inf)
+                label[past] = np.asarray(h2["label"])
+        open_ = (label == LABEL_NONE) | ~np.isfinite(t) | (t >= dome_m)             # nothing there: the dome
+        return d, np.where(open_, dome_m, t), open_ | (label == LABEL_FAR)         # ..., beyond the mesh and the plane
     _, t_down, _ = cast(np.zeros(1), np.zeros(1))
     h_c = float(t_down[0]) if t_down[0] < dome_m else 2.5
     th0 = max(np.radians(20.0), float(np.arctan2(from_m, h_c)) - np.radians(3.0))
     ph_c = np.radians(np.arange(0.0, 360.0, 1.0))
+    # 1.0.5 (Christian, 22 Nov 2026, Skinner Ridge and Wildcat Ridge: "a black semi circle"): the first ring was at
+    # the angle of ``from_m`` on LEVEL ground under C, the same for every azimuth.  Where the ground falls away, the
+    # surface at that angle is far beyond the near terrain's end (Skinner Ridge, to the south: 32 m at -10 deg, the
+    # terrain ends at 20 m) and the band between had no triangle - black in the viewer from east through south to
+    # west.  The first ring is now the lowest angle at which any azimuth's ray is ``from_m`` away (the quads nearer
+    # than that are left out below, as before)
+    th_s = np.arange(np.radians(20.0), th0 + 1e-9, np.radians(0.5))
+    if len(th_s):
+        TS, PS = np.meshgrid(th_s, ph_c, indexing="ij")
+        d_s, t_s, _ = cast(TS.ravel(), PS.ravel())
+        Xs = d_s * t_s[:, None]
+        hd_s = np.linalg.norm(Xs - (Xs @ up)[:, None] * up, axis=1).reshape(TS.shape)
+        reach = (hd_s >= from_m - 1.0) & (t_s.reshape(TS.shape) < dome_m)
+        if reach.any():
+            th0 = max(np.radians(20.0), float(th_s[np.flatnonzero(reach.any(axis=1)).min()]) - np.radians(1.0))
     th_c = np.arange(th0, np.pi - 1e-6, np.radians(0.25))
     TT, PP = np.meshgrid(th_c, ph_c, indexing="ij")
     _, _, sky_c = cast(TT.ravel(), PP.ravel())
@@ -836,14 +1617,21 @@ def horizon_shell(scene, C, pivot, up, north, east, from_m: float = SHELL_FROM_M
     d, t, sky_f = cast(TT.ravel(), PP.ravel())
     low = (t >= dome_m) & (TT.ravel() < np.pi / 2 - 1e-3)        # a ray below the horizontal that meets nothing (a gap
     t[low] = np.minimum(dome_m, h_c / np.cos(TT.ravel()[low]))   # in the scene): on the level ground under C, not the sky
+    t2, low2 = t.reshape(nr, na), low.reshape(nr, na)            # 1.0.5: ... and not nearer than the ring beneath it -
+    for i in range(1, nr):                                       # where the ground falls away, level ground under C is
+        t2[i] = np.where(low2[i], np.maximum(t2[i], t2[i - 1]), t2[i])   # nearer than the terrain's end: a gap again
     V = C + d * t[:, None]
     hd = np.linalg.norm((V - np.asarray(pivot, float)) - ((V - np.asarray(pivot, float)) @ up)[:, None] * up, axis=1).reshape(nr, na)
     F = []
     j = np.arange(na)
     j1 = (j + 1) % na
+    # 1.0.5: a corner on the far surface or the sky is the shell's however near the mast axis it is (Skinner Ridge: the
+    # far surface is 105 m overhead, 15 m from the axis at 82 deg - no sky in a wedge at the zenith)
+    beyond = sky_f.reshape(nr, na)
     for i in range(nr - 2, -1, -1):                              # the outer rings first
         a_, b_, c_, d_ = i * na + j, i * na + j1, (i + 1) * na + j1, (i + 1) * na + j
         far = (hd[i, j] >= from_m) | (hd[i, j1] >= from_m) | (hd[i + 1, j] >= from_m) | (hd[i + 1, j1] >= from_m)
+        far |= beyond[i, j] | beyond[i, j1] | beyond[i + 1, j] | beyond[i + 1, j1]
         F.append(np.stack([a_[far], b_[far], c_[far]], 1))
         F.append(np.stack([a_[far], c_[far], d_[far]], 1))
     F = np.vstack(F).astype(np.int64)
@@ -946,7 +1734,7 @@ def border_fill(rgb: np.ndarray, used: np.ndarray, border_px: int = BORDER_PX) -
 # ------------------------------------------------------------------------------------------- the two parts
 def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, radius_m: float = RADIUS_M,
                  center_above_m: float = CENTER_ABOVE_M, target: int = TARGET_TRIANGLES, linear: bool = False,
-                 rows_per_chunk: int = 128, full: bool = False) -> Dict[str, Any]:
+                 rows_per_chunk: int = 128, full: bool = False, sky_pano=None) -> Dict[str, Any]:
     """The terrain mesh and its texture (see the module): {"V" block (n, 3), "F", "uv" (n, 2), "texture" (S, S, 3)
     float or uint8 as the sources, "record"}.
 
@@ -956,7 +1744,16 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     t0 = time.time()
     P, up, north, east = (np.asarray(x, float) for x in (station.pivot, station.up, station.north, station.east))
     up = _unit(up)
-    V, F, rec = terrain_mesh(scene, P, up, radius_m, target)
+    ceiling = ceiling_key = None
+    if SKY_CEILING and sky_pano is not None:                    # 1.0.6: held under the mast's skyline
+        try:
+            sk = pano_skyline(sky_pano[0])
+            if sk is not None:
+                ceiling = SkyCeiling(sk, float(sky_pano[1]), P, up, north, east)
+                ceiling_key = ("sky", round(float(np.sum(sk)), 3), float(sky_pano[1]))
+        except Exception as e:                                  # noqa: BLE001 - the terrain as the mesh has it
+            log.warning("station mesh: no skyline from the panorama (%s) - the terrain is not held under it", e)
+    V, F, rec = terrain_mesh(scene, P, up, radius_m, target, ceiling=ceiling, ceiling_key=ceiling_key)
     C = P + float(center_above_m) * up
     nrm, area = triangle_normals(V, F)
     rc = _raycaster(V, F)
@@ -968,13 +1765,25 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     view /= np.maximum(np.linalg.norm(view, axis=1), 1e-12)[:, None]
     grazing = np.abs((nrm * view).sum(1)) < GRAZING_COS
     from .mesh import horizontal_distance
-    vis = (seen & ~grazing) | (horizontal_distance(pts[:, 0], P, up) > CELL_RADIUS_M)
+    # 1.0.2 (Christian, 21 Nov 2026, Van Zyl: "the mesh still has a hole in front of the rover"; "here is the mesh
+    # discontinuity" - gray slivers along the outline of the patch under the rover): the mesh's sheets are not sewn
+    # where the fill meets the measured ground, and through the cracks one saw the sheet beneath - hidden from C, so
+    # textured from a cell, in a fill's tone (within 6 m of Van Zyl's mast 119 m2 of level ground was in cells).  A
+    # hidden triangle that lies right under another sheet takes the disc like the sheet above it: seen through a
+    # crack it shows the picture that belongs there
+    under = np.ones(len(F), bool)
+    for j in range(pts.shape[1]):
+        under &= under_a_sheet(rc, pts[:, j], up)
+    under &= ~seen
+    if rec.get("top_sheet"):                                    # 1.0.5: one sheet has nothing beneath it - what is
+        under[:] = False                                        # hidden there is a rock's far side, not a crack
+    vis = (seen & ~grazing) | (under & ~grazing) | (horizontal_distance(pts[:, 0], P, up) > CELL_RADIUS_M)
     used = np.unique(F[vis])
     th = np.arccos(np.clip(((V[used] - C) / np.linalg.norm(V[used] - C, axis=1)[:, None]) @ -up, -1, 1))
     theta_max = float(min(np.pi * 0.995, th.max() + np.radians(0.5)))
     shell = knee = None
     if full:
-        shell = horizon_shell(scene, C, P, up, north, east)
+        shell = horizon_shell(scene, C, P, up, north, east, near=(rc, float(radius_m)))
         knee = (max(shell["knee"], theta_max), HORIZON_FRAC)
         theta_max = float(np.pi)
     rpx = size / 2.0 - GUTTER_PX - 2
@@ -983,10 +1792,25 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
         nrm = -nrm                                              # start above the surface)
     uv_v = disc_uv(V, C, size, rpx, theta_max, up, north, east, knee=knee)
     uv_v, vis, warp = warp_small_patches(V, F, uv_v, vis, area)  # 0.99.51: small hidden patches keep the disc
-    hid = np.flatnonzero(~vis)
-    nh = nrm[hid].copy()
-    lay = triangle_layout(V, F[hid], nh)
-    cells = layout_cells(lay, area[hid], size, disc=disc)
+    # 1.0.5: the cells have to fit beside the disc.  A site of many rocks has more hidden triangles than the corners
+    # hold (each cell has its gutter): then only those nearer the mast get cells, the others the disc's picture
+    rh = horizontal_distance(pts[:, 0], P, up)
+    cell_radius = CELL_RADIUS_M
+    for cell_radius in (CELL_RADIUS_M, 7.5, 5.0, 3.5, 2.5, 0.0):
+        v2 = vis | (rh > cell_radius)
+        hid = np.flatnonzero(~v2)
+        nh = nrm[hid].copy()
+        lay = triangle_layout(V, F[hid], nh)
+        try:
+            cells = layout_cells(lay, area[hid], size, disc=disc)
+        except RuntimeError:
+            if cell_radius == 0.0:
+                raise
+            continue
+        vis = v2
+        break
+    if cell_radius < CELL_RADIUS_M:
+        log.info("station mesh: the hidden triangles' cells fit only within %.1f m of the mast axis (%d cells)", cell_radius, len(hid))
     args = {"size": size, "linear": linear, "up": tuple(up), "offset_m": TERRAIN_OFFSET_M,
             "disc": {"C": tuple(C), "rpx": rpx, "theta_max": theta_max, "up": tuple(up), "north": tuple(north), "east": tuple(east),
                      "knee": knee},
@@ -1007,11 +1831,21 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     else:
         filled = push_pull(rgb, have & in_disc, in_disc)
     sky_white = None
-    if full and SKY_WHITE and sky is not None:                   # 0.99.41: the sky white
+    sky_smoothed = 0
+    if full and SKY_IMAGED and sky is not None:                  # 1.0.1: the panorama's own sky, smoothed above the skyline
+        sky_smoothed = smooth_sky(rgb, sky & in_disc, size, rpx, knee, pano=sky_pano, frame=(up, north, east))
+    elif full and SKY_WHITE and sky is not None:                 # 0.99.41: the sky white
         sky_white = sky_texels(rgb, sky & in_disc, have, in_disc, size, rpx, knee)
     sky = None
     med = np.median(rgb[seen_disc][::97], axis=0) if seen_disc.any() else np.full(3, 128.0)
-    cell_filled = fill_cells(rgb, have, cells, med)
+    cell_grown = 0
+    if GROW_COLORS and len(hid):
+        try:                                                    # 1.0.5: colors grown in from the patch's seen edges
+            vcol = grown_vertex_colors(F, vis, _bilinear(rgb, uv_v[:, 0] * size, uv_v[:, 1] * size), med)
+            cell_grown = grow_cells(rgb, have, cells, vcol[F[hid]])
+        except Exception as e:                                  # noqa: BLE001 - the flat fill below
+            log.warning("station mesh: growing the hidden cells' colors failed (%s) - they take one color each", e)
+    cell_filled = cell_grown or fill_cells(rgb, have, cells, med)
     used = in_disc.copy()                                        # 0.99.51: a band about the disc and the cells takes
     for (x, y), (w, h) in zip(cells["pos"], cells["wh"]):        # their colors; beyond it, the fifth mode's white
         used[int(y):int(y + h), int(x):int(x + w)] = True
@@ -1037,9 +1871,11 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     rec.update(texture_px=size, center_above_pivot_m=float(center_above_m), theta_max_deg=round(float(np.degrees(theta_max)), 2),
                triangles_from_center=int(vis.sum()), triangles_in_cells=int(len(hid)),
                hidden_from_center=int((~seen).sum()), edge_on_from_center=int((seen & grazing).sum()),
+               under_a_sheet=int(under.sum()), cell_radius_m=float(cell_radius),
                cell_texel_mm=None if cells["texel_m"] is None else round(1000 * cells["texel_m"], 2),
                disc_texels_colored=round(float(seen_disc.sum() / max(n_disc_texels, 1)), 4),
                disc_texels_filled=int(filled.sum()), cell_texels_filled=int(cell_filled),
+               cell_fill="grown in from the patch's seen edges" if cell_grown else "one color per cell",
                border_texels_filled=int(border_filled), warped=warp,
                mrad_per_texel=round(1000 * (knee[0] / (knee[1] * rpx) if knee else theta_max / rpx), 4))
     out_shell = None
@@ -1056,6 +1892,9 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
              100 * rec["disc_texels_colored"], rec["seconds"])
     if white is not None:
         rec.update(white_texels=int(white.sum()))
+    if sky_smoothed:
+        rec.update(sky=("as imaged below the skyline's circle; above it the panorama's sky" if sky_pano is not None else
+                        "as imaged; the far texels above the skyline's circle smoothed"), sky_texels_smoothed=int(sky_smoothed))
     return {"V": Vo[keep], "F": remap[Fo], "uv": UVo[keep], "texture": rgb, "record": rec, "shell": out_shell, "white": white}
 
 
@@ -1079,6 +1918,16 @@ def rover_families(sources) -> str:
     own = "".join(sorted({s.name[:1] for s in sources if not getattr(s, "fill_only", False) and s.name
                           and not getattr(s, "no_rover", False)}))
     return ROVER_FAMILIES + "".join(f for f in own if f not in ROVER_FAMILIES and f != "F" and f != "R")
+
+
+ROVER_UNMASKED_PASS = True      # 1.0.5: the rover's texels no frame colored, colored again without the rover masks
+
+
+def rover_sources(sources, families: str) -> List[Any]:
+    """1.0.5: the frames that may color the rover model: of ``families``, the station's own (not a context frame,
+    not a fill-only one, not one marked ``no_rover``)."""
+    return [s for s in sources if s.name[:1] in families and not (getattr(s, "context", False)
+            or getattr(s, "no_rover", False) or getattr(s, "fill_only", False))]
 
 
 def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX, view_radius_m: float = VIEW_RADIUS_M,
@@ -1116,6 +1965,23 @@ def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX,
             s = seen_from(rc_all, pts[:, j], vp)
             side[s] += np.sign(((vp - pts[s, j]) * nrm[s]).sum(1))
             seen |= s
+    # 1.0.5 (Christian, 22 Nov 2026: the rover model has more gray surfaces than it should - "Texture every
+    # surface that the ncams see"): a triangle a frame of the station sees - in the frame, nothing of the mesh
+    # between - is textured too, wherever the viewer may stand
+    seen_vp = seen.copy()
+    cam_srcs = rover_sources(sources, families)
+    cam = np.zeros(len(F), bool)
+    for src in cam_srcs:
+        for j in range(pts.shape[1]):
+            _, z, inside = src.project(pts[:, j])
+            q = np.flatnonzero(inside)
+            if not len(q):
+                continue
+            v = seen_from(rc_all, pts[q, j], src.C)
+            q = q[v]
+            cam[q] = True
+            side[q] += np.sign(((src.C - pts[q, j]) * nrm[q]).sum(1))
+    seen = seen_vp | cam
     k = np.flatnonzero(seen)
     nk = nrm[k] * np.where(side[k] < 0, -1.0, 1.0)[:, None]    # the side that is seen
     gw, gh = GRAY_STRIP
@@ -1124,6 +1990,23 @@ def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX,
             "all_cells": cells, "normals": nk}
     tex = render_texture(scene, sources, args, pool, rows_per_chunk)
     rgb, have = np.asarray(tex.pop("rgb"), np.float32), tex.pop("source") >= 0
+    tex = None
+    # 1.0.5: a texel of a triangle a frame sees that no frame colored - the frames' rover masks miss the thin parts
+    # and the edges (a strut, a wheel's rim, the arm), and a pixel the mask calls terrain may not color the model -
+    # is colored again by the station's own frames without that check (ROVER_UNMASKED_PASS)
+    second = 0
+    tm = cells.get("tri_map")
+    if ROVER_UNMASKED_PASS and tm is not None and cam.any():
+        want = (tm >= 0) & ~have
+        want &= cam[k][np.where(tm >= 0, tm, 0)]
+        if want.any():
+            tex2 = render_texture(scene, sources, dict(args, all_cells=dict(cells, tri_map=np.where(want, tm, -1)),
+                                                       rover_fallback=True), pool, rows_per_chunk)
+            got = want & (tex2["source"] >= 0)
+            rgb[got] = np.asarray(tex2["rgb"], np.float32)[got]
+            have |= got
+            second = int(got.sum())
+            tex2 = None
     from .ods import ROVER_GRAY_REL
     from .rover_surface import GRAY_SHADE
     colored = np.zeros(have.shape, bool)
@@ -1142,6 +2025,9 @@ def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX,
     UVo = np.concatenate([cells["uv"].reshape(-1, 2), np.repeat(uv_un, 3, axis=0)])
     Fo = np.arange(len(Vo)).reshape(-1, 3)
     rec = {"triangles": int(len(F)), "textured_triangles": int(len(k)),
+           "seen_by_frames": int(cam.sum()), "seen_by_frames_only": int((cam & ~seen_vp).sum()),
+           "seen_from_viewpoints_only": int((seen_vp & ~cam).sum()), "frames": int(len(cam_srcs)),
+           "texels_colored_without_rover_mask": second,
            "textured_area_share": round(float(area[k].sum() / max(area.sum(), 1e-12)), 4),
            "viewpoints": int(len(good)), "viewpoints_inside_the_model": int(len(vps) - len(good)),
            "view_radius_m": float(view_radius_m), "families": families, "texture_px": size,
@@ -1155,6 +2041,29 @@ def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX,
              "texel %s mm, %.0f %% of the texels colored by the frames (%.0f s)", len(k), len(F), 100 * rec["textured_area_share"],
              len(good), view_radius_m, rec["charts"], rec["texel_mm"], 100 * rec["texels_colored"], rec["seconds"])
     return {"V": Vo, "F": Fo, "uv": UVo, "texture": rgb, "record": rec}
+
+
+def model_code() -> str:
+    """1.0.5: a hash of this module - the code that makes the full 3D model's parts.  Every part's record carries it
+    ("model_code"); the station runs (:mod:`rpp.ibr.single_sites`) make a station's model again when it differs, and
+    leave the station's mesh and panoramas, which this module does not make, as they are."""
+    import hashlib
+    return hashlib.sha1(Path(__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest()[:16]
+
+
+def model_current(folder: PathLike, kinds: Sequence[str]) -> bool:
+    """True when ``folder`` holds a part of each of ``kinds`` (keys of :data:`PART`) made by this code."""
+    now = model_code()
+    for kind in kinds:
+        ok = False
+        for f in Path(folder).glob(f"*{PART[kind]}.json"):
+            try:
+                ok = ok or json.loads(f.read_text(encoding="utf-8")).get("model_code") == now
+            except (OSError, ValueError):
+                pass
+        if not ok:
+            return False
+    return True
 
 
 def write_part(out_dir: PathLike, prefix: str, kind: str, part: Dict[str, Any], station, to8, to16=None) -> Dict[str, Any]:
@@ -1191,8 +2100,37 @@ def write_part(out_dir: PathLike, prefix: str, kind: str, part: Dict[str, Any], 
         extra = {"shell_V": page_frame(sh["V"], station.pivot, station.east, station.up, station.north),
                  "shell_F": np.asarray(sh["F"], np.uint32), "shell_uv": np.asarray(sh["uv"], np.float32)}
     np.savez_compressed(out / (stem + ".npz"), V=Vp, F=np.asarray(part["F"], np.uint32), uv=np.asarray(part["uv"], np.float32), **extra)
-    rec = dict(part["record"], kind=kind, files=[stem + ".npz", stem + ".jpg"] + files16, vertices=int(len(Vp)), mesh_triangles=int(len(part["F"])))
+    rec = dict(part["record"], kind=kind, files=[stem + ".npz", stem + ".jpg"] + files16, vertices=int(len(Vp)), mesh_triangles=int(len(part["F"])),
+               model_code=model_code())
     (out / (stem + ".json")).write_text(json.dumps(rec, indent=1), encoding="utf-8")
+    return rec
+
+
+def copy_part(src_dir: PathLike, dst_dir: PathLike, prefix: str, kind: str = "rover") -> Optional[Dict[str, Any]]:
+    """1.0.6 (Christian, 22 Nov 2026: "The z34 full 3d should use the ncam rover texture"): a part made by another run
+    of the same station - the Navcam run's rover, for its Mastcam-Z version, whose own frames do not color the rover
+    (they are not a deck pan) and whose context frames never do - copied in under this run's ``prefix``.  The two
+    runs share the pivot (1.0.1) and the rover model, so the geometry is the same.  None when ``src_dir`` holds no
+    such part."""
+    src, dst = Path(src_dir), Path(dst_dir)
+    recs = sorted(src.glob(f"*_{PART[kind]}.json"))
+    if len(recs) != 1:
+        return None
+    sstem = recs[0].name[: -len(".json")]
+    rec = json.loads(recs[0].read_text(encoding="utf-8"))
+    dstem = f"{prefix + '_' if prefix else ''}{PART[kind]}"
+    files = []
+    for f in rec.get("files") or []:
+        sf = src / f
+        if not sf.is_file():
+            if f.endswith((".npz", ".jpg")):
+                return None
+            continue
+        df = dst / (dstem + f[len(sstem):] if f.startswith(sstem) else f)
+        df.write_bytes(sf.read_bytes())
+        files.append(df.name)
+    rec = dict(rec, files=files, copied_from=str(recs[0]))
+    (dst / (dstem + ".json")).write_text(json.dumps(rec, indent=1), encoding="utf-8")
     return rec
 
 
@@ -1329,6 +2267,22 @@ def _part_files(folder: Path, kind: str) -> Optional[Tuple[Path, Path, Path]]:
     return None
 
 
+def glb_texture(path: PathLike, kind: str) -> bytes:
+    """The JPEG bytes of a part's texture for a .glb: the file itself, or - the rover's, made at ROVER_TEXTURE_PX - a
+    copy reduced to ROVER_GLB_PX (1.0.1: the 8k texture stays beside the .glb, a headset is served 4k)."""
+    data = Path(path).read_bytes()
+    if kind != "rover":
+        return data
+    import cv2
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None or max(img.shape[:2]) <= ROVER_GLB_PX:
+        return data
+    k = ROVER_GLB_PX / float(max(img.shape[:2]))
+    small = cv2.resize(img, (int(round(img.shape[1] * k)), int(round(img.shape[0] * k))), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    return buf.tobytes() if ok else data
+
+
 def assemble_scape(folder: PathLike, rover_folder: Optional[PathLike] = None, out: Optional[PathLike] = None) -> Optional[Dict[str, Any]]:
     """0.99.32: ``<prefix>_station_scape.glb`` in ``folder`` - the fifth mode's file: the meshes "terrain" (the near
     terrain), "horizon" (the shell, on the terrain's texture - so it comes after it in the file; the viewer draws it
@@ -1350,7 +2304,7 @@ def assemble_scape(folder: PathLike, rover_folder: Optional[PathLike] = None, ou
         recs["terrain"] = {}
     if rp is not None:
         with np.load(rp[0]) as z:
-            parts.append(("rover", z["V"], z["F"], z["uv"], rp[1].read_bytes()))
+            parts.append(("rover", z["V"], z["F"], z["uv"], glb_texture(rp[1], "rover")))
         try:
             recs["rover"] = json.loads(rp[2].read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1384,7 +2338,7 @@ def assemble(folder: PathLike, rover_folder: Optional[PathLike] = None, out: Opt
         if files is None:
             continue
         with np.load(files[0]) as z:
-            parts.append((kind, z["V"], z["F"], z["uv"], files[1].read_bytes()))
+            parts.append((kind, z["V"], z["F"], z["uv"], glb_texture(files[1], kind)))
         try:
             recs[kind] = json.loads(files[2].read_text(encoding="utf-8"))
         except (OSError, ValueError):

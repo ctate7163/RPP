@@ -71,6 +71,6 @@ XMP_OLD_PREFIX = "mppp"                     # stereo panoramas and processed ima
 # ``tests/test_spelling.py`` checks that British spelling appears only in such names.
 PIVOT_EYE = "centre"                        # rpp ods --eyes center: the panorama from the pivot, <station>_ods_centre.png
 SPELLING_KEPT_NAMES = ("max_centre_tint", "prior_gauge_recentre", "centre_tint", "grey_prob",   # settings, records
-                       "colour_demosaicing", "grey_closing", "labelleft",                       # other packages
+                       "colour_demosaicing", "grey_closing", "grey_erosion", "grey_dilation", "labelleft",                       # other packages
                        "orient_normals_towards_camera_location",                               # (Open3D)
                        "centre_mrad", "centre_mast_mm", "centre_pixel_yaw_pitch_mrad", "recentred")  # report keys

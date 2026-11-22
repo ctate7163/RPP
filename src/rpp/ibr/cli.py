@@ -48,8 +48,23 @@ def _model(project):
 def _station(project, rec, a):
     from .station import select_station
     _rover(a)
-    st = select_station(project, rec, a.station, families=getattr(a, "cameras", "N") or "N",
+    fam = getattr(a, "cameras", "N") or "N"
+    st = select_station(project, rec, a.station, families=fam,
                         pivot_height=getattr(a, "pivot_height", None) or "zcam")
+    if "N" not in str(fam).upper():
+        # 1.0.1 (Christian, 21 Nov 2026: "render the Z34 from the exact same pivot point as the ncam"): a station
+        # rendered from Mastcam-Z frames takes the pivot of its Navcam frames - the point the Navcam station is
+        # rendered from in the same block - not one fitted to the Mastcam-Z centers
+        try:
+            nav = select_station(project, rec, a.station, families="N",
+                                 pivot_height=getattr(a, "pivot_height", None) or "zcam")
+            own = [float(v) for v in st.pivot]
+            st.pivot = nav.pivot.copy()
+            st.pivot_fit = dict(nav.pivot_fit, pivot_from="the station's Navcam frames (1.0.1)", pivot_of_own_frames=own)
+            log.info("station: the pivot of the Navcam frames (%.3f m from the one fitted to the %s frames)",
+                     float(((st.pivot - own) ** 2).sum() ** 0.5), fam)
+        except Exception as e:                                   # noqa: BLE001 - no Navcam frame at the station
+            log.warning("station: no Navcam pivot (%s: %s) - the pivot of the %s frames stays", type(e).__name__, e, fam)
     if not re.match(r"sol\d+_", str(a.station).strip(), re.I):   # 0.97.14: the code carries the sol of the frames used
         from .station import sol_of_frames, station_code       # (--station Sol0052 names it outright)
         sol = sol_of_frames(_frames(project, st, a) or [])
@@ -264,6 +279,9 @@ def add_parsers(sub) -> None:
     p.add_argument("--rover-zcam", action="store_true",
                    help="0.99.46: the Mastcam-Z frames color the rover too (a run with a dedicated Mastcam-Z deck pan in "
                         "stereo); default: the rover from the Navcam frames alone")
+    p.add_argument("--rover-part-from", default=None, metavar="DIR",
+                   help="1.0.6: the full 3D model's rover part copied from this folder (the Navcam run's with_rover of "
+                        "the same station), not made from this run's frames (a Mastcam-Z version)")
     p.add_argument("--fill-cameras", default="", metavar="LETTERS",
                    help="0.97.7: the station's frames of these camera families as fill-only sources - they color what "
                         "the panorama's own frames do not see (F: the front Hazcam pair, for the terrain under the arm; "
@@ -569,6 +587,7 @@ def cmd_ods(a: argparse.Namespace) -> int:
                          tone_levels_file=a.tone_levels, center_depth=not a.no_depth,
                          fill_families=a.fill_cameras, nadir_mark=not a.no_nadir_mark, site_name=a.site_name,
                          rover_zcam=getattr(a, "rover_zcam", False),
+                         rover_part_from=getattr(a, "rover_part_from", None),
                          nadir_mark_deg=a.nadir_mark_deg)
     if getattr(a, "station_mesh_only", False):
         print(f"station mesh part: {json.dumps(rep, default=str)[:600]}")

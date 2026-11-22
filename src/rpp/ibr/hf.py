@@ -293,6 +293,16 @@ def publish(web_dir, doc: Dict[str, Any], labels: Sequence[str], out_root, previ
         done.append(lab)
         log.info("hf: %s - %d files, %.0f MB in %.0f s (commit %s)", lab, res["files"], res["bytes"] / 1e6,
                  time.time() - t0, str(res["commit"])[:10])
+    # 1.0.1: the welcome view is Van Zyl's own entry (rpp.ibr.web.welcome_from) - made again from the entry as it is
+    # now, with its files' addresses on the dataset (it was built before the upload, with local paths)
+    try:
+        from .web import WELCOME_STATION, welcome_from
+        vz = next((p for p in panos if p.get("id") in (WELCOME_STATION, "Sol0052_S003D2046") and not p.get("welcome")), None)
+        new = welcome_from(vz) if vz else None
+        if new:
+            panos = [new if p.get("welcome") else p for p in panos]
+    except Exception as e:                                       # noqa: BLE001 - the list still goes out
+        log.warning("hf: the welcome entry was not made again (%s)", e)
     out = dict(doc, panos=panos)
     (web / "panos.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     removed = prune_local(web, out)

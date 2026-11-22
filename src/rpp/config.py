@@ -36,6 +36,14 @@ _DEFAULTS: Dict[str, Any] = {
         # Floor on mu = sin(solar elevation) in the correction (avoids blow-up
         # near the horizon).
         "zenith_min": 0.2,
+        # 1.0.1 (Christian, 21 Nov 2026: "apply the sun distance effect using the inverse square effect with the
+        # atmospheric extinction model using tau and zenith scaling ... as a part of the standard processing"): the
+        # zenith scale also carries (reference / distance)^2 for the Sun's distance at the image's L_s
+        # (rpp.sun.mars_sun_distance_ls: 1.381-1.666 au, sunlight x 1.22 ... 0.84 of that at the reference).  Part
+        # of the tau correction (apply_tau_correction False leaves it out too).  A configuration saved before 1.0.1
+        # has no such key and gets this default: its panoramas are made with the distance term.
+        "apply_sun_distance": True,
+        "sun_distance_reference_au": 1.5237,
     },
     "color": {
         "enhance": True,
@@ -68,8 +76,29 @@ _DEFAULTS: Dict[str, Any] = {
         # Z = Mastcam-Z).  0.99.22: the ecams 8 % brighter than before, at Mastcam-Z's level (N 0.990 x 1.08,
         # F/R 1.104 x 1.079); to 0.99.21 it was {"N": 0.9} with the level in the balances
         "brightness_by_family": {"N": 1.069, "F": 1.191, "R": 1.191, "Z": 1.0},
-        "scale_rad_to_int16": 2e5,
-        "scale_int8_to_int16": 64,
+        # 1.0.2 (Christian, 21 Nov 2026: "are navcam left and right frames generally at the same brightness or is
+        # there a bias by 1-5 % ... Other sources indicate that the right/left brightness ratio is about 0.97 ...
+        # implement a scale difference to bring them into agreement"): a factor per camera (family + eye) on top of
+        # the family's.  Measured on 11 Navcam stereo pairs of sols 72-1601 (RAD products, SIFT matches, 9 x 9 px
+        # means at 52-1,638 matched points a pair): right / left = 0.955 (median; pairs 0.90-0.98, sd 0.024; R 0.961,
+        # G 0.951, B 0.964); another measurement of the day gave about 0.97.  "use a 0.96 factor now, and park the idea
+        # of re-estimating flat fields" (the pairs' spread points at the flat fields).  Split between the eyes so that
+        # the Navcam level stays: left x 0.980, right x 1.021 (right / left of the corrected images: 1)
+        "brightness_by_eye": {"NL": 0.980, "NR": 1.021},
+        # 1.0.1 (Christian, 21 Nov 2026: "I set the brightness scale in order to not make rockytop and bright angel
+        # too bright. Now that [we] know about the x0.82 effect, we can increase the scale by about x1.1"; "color.
+        # brightness_gain should be the same as scale ... multiply scale for all the cameras by that gain"): the
+        # scale of every camera x 1.1, 2e5 -> 2.2e5 (the gain was its own key for some hours).  The level was set
+        # on blocks imaged near perihelion, which the Sun-distance term (radiometry.apply_sun_distance) now darkens
+        # by 0.82; with the new scale they end at 0.90 of their old level and the aphelion blocks (Belva, Seitah,
+        # Chal Rocks) at 1.31.  A block processed before 1.0.1 holds 2e5 in its saved configuration: its station
+        # frames get the factor from rpp.ibr.linear16.block_config (SCALE_GAIN_1P01).
+        # 1.0.1 (Christian, 21 Nov 2026: "The 16-bit images should be a little dimmer to avoid saturations ... the 16
+        # bit values are lower but the 8 bit values are the same"; "lower the 16 bit by 1.25"): 2.2e5 / 1.25 = 1.76e5
+        # counts per unit of radiance, and 64 / 1.25 = 51.2 of them per 8-bit count - the 8-bit image is the same
+        # (2.2e5 / 64 = 1.76e5 / 51.2), the 16-bit ceiling is 5 x 8-bit white (was 4 x)
+        "scale_rad_to_int16": 1.76e5,
+        "scale_int8_to_int16": 51.2,
         "offset_int8_to_int16": 0.0,
         "apply_gamma": False,     # applies to the 8-bit product only
         "gamma": 2.0,
@@ -146,7 +175,7 @@ def default_config() -> Dict[str, Any]:
 
 
 def _deep_merge(base: Dict[str, Any], over: Dict[str, Any], path: str = "") -> Dict[str, Any]:
-    open_maps = ("color.brightness_by_family", "masking.skip_inference_at")      # any key is a value here
+    open_maps = ("color.brightness_by_family", "color.brightness_by_eye", "masking.skip_inference_at")      # any key is a value here
     if path in open_maps:
         base.update(over)
         return base

@@ -35,7 +35,11 @@ def _test_data_dir() -> Path:
         import shutil
         from rpp.pds import fetch_products
         arch = cache.parent / "pds"
-        rep = fetch_products(names, arch, labels=True)
+        try:                                     # 1.0: an archive that cannot be reached skips those tests, not all
+            rep = fetch_products(names, arch, labels=True)
+        except Exception as e:                   # noqa: BLE001
+            print(f"conftest: the PDS test products were not fetched ({type(e).__name__}: {e})", file=sys.stderr)
+            rep = {}
         cache.mkdir(parents=True, exist_ok=True)
         for f in rep.get("files", []):
             if Path(f).suffix.upper() == ".IMG" or Path(f).suffix.lower() == ".xml":
@@ -124,3 +128,14 @@ def _no_old_rpp_variables(monkeypatch):
     leaves unset (rpp.env falls back to it); the tests that check the fallback set it themselves."""
     for k in [k for k in os.environ if k.startswith("MPPP_")]:
         monkeypatch.delenv(k, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _coarse_top_sheet(monkeypatch):
+    """1.0.5: the viewer's terrain is sampled on a 10 cm grid in the tests (2.5 cm in use: four million triangles to
+    simplify in every test that makes a station's model).  A test of the sheet itself gives its own step."""
+    try:
+        from rpp.ibr import station_mesh
+    except Exception:                                            # noqa: BLE001 - a test without the ibr package's needs
+        return
+    monkeypatch.setattr(station_mesh, "TOP_STEP_M", 0.1)

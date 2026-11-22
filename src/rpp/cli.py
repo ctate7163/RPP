@@ -169,6 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
                    "beyond 20 m dropped by the filter")
     p.add_argument("--keep-maps", action="store_true", help="keep the filtered depth maps (a few GB a block)")
     p.add_argument("--refuse", action="store_true", help="filter and fuse again even when the variants are there")
+    p.add_argument("--cloud", nargs="+", default=None, metavar="NAME=PATH",
+                   help="1.0.1: further clouds of the same alignment, meshed and scored as they are (a fused.ply or its "
+                        "workspace), e.g. z34=D:\\...\\colmap\\dense_S026D1222_NZ34")
     p = sub.add_parser("dense", help="the COLMAP dense reconstruction of a finished block - the workspace "
                        "<project>/dense (images undistorted from the native-pixel model, the rover masks for the "
                        "fusion), patch-match stereo, fusion, a mesh; dense_reconstruct.bat next to open_in_colmap.bat "
@@ -194,7 +197,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-depth", type=float, default=None, help="--maps: depth beyond this (m) is left out (default 100)")
     p.add_argument("--station", default=None, help="only the frames of this station (S026D0630, 26_630, sol:461): "
                    "a sub-model of them, its own workspace <project>/dense_<station>[_<sequence>]")
-    p.add_argument("--cameras", default="N", help="--station: the camera families (default N)")
+    p.add_argument("--cameras", default="N", help="--station: the camera families (default N; NZ: Navcam and "
+                   "Mastcam-Z - the workspace then dense_<station>_NZ[<zooms>])")
+    p.add_argument("--zooms", nargs="+", type=int, default=None, metavar="MM",
+                   help="1.0.1, with Z in --cameras: only the Mastcam-Z frames of these zooms (e.g. 34)")
     p.add_argument("--sequence", nargs="+", default=None, help="--station: only these sequences (NCAM03461 ...)")
     p.add_argument("--nearby-m", type=float, default=None, metavar="M",
                    help="0.97.0, with --station: also the frames of the block's other stations within M meters (they "
@@ -210,7 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "the workspace is dense_block_<families>; --cameras still chooses the station's own frames")
     p.add_argument("--block-images", nargs="+", default=None, metavar="NAME",
                    help="with --whole-block, the block's cloud from these frames only (a terrain set of the "
-                        "single-sites config), in the workspace dense_block_<--block-name>")
+                        "single-sites config), in the workspace dense_block_<--block-name>; a name with * ? [ is a "
+                        "pattern over the block's frames of the --block-cameras families (???_0052_*: sol 52)")
     p.add_argument("--block-name", default=None, help="the name of the --block-images set (its workspace)")
     p.add_argument("--scale", type=float, default=None, help="--station: only frames at this downsample (0.5: half-res)")
     p.add_argument("--images", nargs="+", default=None, help="only these image names (instead of --station)")
@@ -834,7 +841,9 @@ FUSION_RECORD = "rpp_fusion.json"
 FUSION_CODES_0P99 = ("5aa9d5f18a9a6fdc", "74faa498abf96418", "0c917caf3b0a008e",   # 0.99.51, 0.99.52 (in progress),
                      "5f46dcfc18415f4b")                                          # 0.99.52, 0.99.53
 DENSE_CODE_0P99 = "4e328c4415a18d58"
-LOOSE_FUSION_CODES = FUSION_CODES_0P99 + (DENSE_CODE_0P99,)
+FUSION_CODE_1P0 = "e3cd79c79c791344"                         # 1.0.0rc1's sfm/dense.py (1.0.1 added the depth check
+                                                               # and repair to the stereo step; the fusion is the same)
+LOOSE_FUSION_CODES = FUSION_CODES_0P99 + (DENSE_CODE_0P99, FUSION_CODE_1P0)
 
 
 def fusion_code() -> str:
@@ -919,7 +928,15 @@ def cmd_dense(a: argparse.Namespace) -> int:
             print(f"dense --whole-block: no frames of the families {''.join(sorted(fam))!r} in {proj_dir}", file=sys.stderr)
             return 2
         ws = proj_dir / f"{DENSE_DIR}_block_{''.join(sorted(fam))}"
-        pick = [n if str(n).lower().endswith(".png") else f"{n}.png" for n in (getattr(a, "block_images", None) or [])]
+        raw = [str(n) for n in (getattr(a, "block_images", None) or [])]
+        wild = [n for n in raw if any(c in n for c in "*?[")]    # 1.0.5: a name with * ? [ is a pattern over the block's
+        pick = [n if n.lower().endswith(".png") else f"{n}.png" for n in raw if n not in wild]   # frames (single-sites --terrain regular)
+        if wild:
+            import fnmatch
+            hits = {m for n in wild for m in fnmatch.filter(subset, n)}
+            print(f"dense --block-images: {len(wild)} pattern(s) match {len(hits)} of the block's {len(subset)} "
+                  f"{''.join(sorted(fam))} frames")
+            pick = sorted(set(pick) | hits) or ["(no frame matches the patterns)"]
         if pick:                                                 # 0.98.19: a named set of the block's frames
             known = set(subset)
             gone = [n for n in pick if n not in known]
@@ -940,11 +957,15 @@ def cmd_dense(a: argparse.Namespace) -> int:
               + (f"; {len(stub[1])} of them are the station's own" if stub else ""))
     elif getattr(a, "station", None) or getattr(a, "images", None):
         subset = subset_images(proj, station=a.station, families=a.cameras, sequences=a.sequence, names=a.images,
-                               scale=a.scale)
+                               scale=a.scale, zooms=getattr(a, "zooms", None))
         if not subset:
             print(f"dense: no frames for --station {a.station} --cameras {a.cameras} --sequence {a.sequence}", file=sys.stderr)
             return 2
         ws = proj_dir / subset_label(a.station, a.sequence, a.images)
+        fams = "".join(sorted(set((a.cameras or "N").upper())))
+        if a.station and not a.images and fams != "N":           # 1.0.1: other families, their own workspace
+            zs = "".join(str(z) for z in sorted(set(getattr(a, "zooms", None) or []))) if "Z" in fams else ""
+            ws = ws.with_name(f"{ws.name}_{fams}{zs}")
         if getattr(a, "nearby_m", None) and a.station:          # 0.97.0: the neighbors' frames, for the ground here
             from .sfm.dense import nearby_station_images
             nb = nearby_station_images(proj, a.station, a.nearby_m, families=a.cameras, scale=a.scale)
@@ -999,8 +1020,8 @@ def cmd_dense(a: argparse.Namespace) -> int:
     # the CUDA python the alignment itself uses (pipeline._default_gpu_python: RPP_GPU_PYTHON, RPP_GPU_PY,
     # %LOCALAPPDATA%\mppp\gpu_python.txt, the rpp_gpu conda env) when neither --python nor GPU_PYTHON names one.
     # 10 Nov on the PC: the 9 Nov fix looked at gpu_python() alone and missed RPP_GPU_PYTHON / the rpp_gpu env
-    from .sfm.dense import (PATCH_MATCH_SOURCES, STATION_FUSION_OPTIONS, STATION_FUSION_STRICT, STATION_STEREO_FAST,
-                            STATION_STEREO_OPTIONS, workspace_stereo_record)
+    from .sfm.dense import (PATCH_MATCH_SOURCES, STATION_DEPTH_RANGE, STATION_FUSION_OPTIONS, STATION_FUSION_STRICT,
+                            STATION_STEREO_FAST, STATION_STEREO_OPTIONS, frames_to_repair, workspace_stereo_record)
     so = dict(STATION_STEREO_OPTIONS) if subset is not None else {}     # 10 Nov: COLMAP's 3 deg stopped Rockytop at 8 m
     fo = dict(STATION_FUSION_OPTIONS) if subset is not None else {}
     # 1.0: new maps with fewer source images and a sparser matching window; a workspace that already holds maps keeps
@@ -1014,6 +1035,7 @@ def cmd_dense(a: argparse.Namespace) -> int:
               f"are kept - their options again ({sources or 'COLMAP 20'} source images)")
     elif subset is not None:
         so.update(STATION_STEREO_FAST)
+        so.update(STATION_DEPTH_RANGE)                             # 1.0.1: the depth searched, not the tie points' range
         sources = PATCH_MATCH_SOURCES
     if getattr(a, "sources", None) is not None:
         sources = int(a.sources) or None
@@ -1034,7 +1056,11 @@ def cmd_dense(a: argparse.Namespace) -> int:
     need_gpu = True
     if "stereo" in steps and not getattr(a, "restereo", False):           # 0.97.0: nothing to compute -> no GPU, no wait
         from .sfm.dense import stereo_cached
-        if stereo_cached(ws, so, max_image_size=size, sources=sources):
+        bad = frames_to_repair(ws) if (ws / "stereo" / "depth_maps").is_dir() else []
+        if bad:                                                  # 1.0.1: the stereo step repairs them (run_dense)
+            print(f"dense: {len(bad)} frame(s) with failed depth maps - made again with depth "
+                  f"{STATION_DEPTH_RANGE['depth_min']}-{STATION_DEPTH_RANGE['depth_max']} m: {', '.join(bad)}")
+        if not bad and stereo_cached(ws, so, max_image_size=size, sources=sources):
             steps = [s for s in steps if s != "stereo"]
             need_gpu = False
             print("dense: the stereo maps of this workspace are there, made with these options - stereo skipped, "

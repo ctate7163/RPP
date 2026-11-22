@@ -58,6 +58,85 @@ def block_terrain(st: Dict[str, Any], cfg: Dict[str, Any]):
     return name, [n if str(n).lower().endswith(".png") else f"{n}.png" for n in sets[name]["images"]]
 
 
+REGULAR_SUFFIXES = ("_large", "_huge")  # 1.0.5: the sizes of a block that --terrain regular limits
+REGULAR_NEAR_M = 30.0                   # ... to the stations within this of the station, where no regular block serves
+_PROJECT_CACHE: Dict[str, Any] = {}
+
+
+def _block_project(work: PathLike):
+    """The block's project (cached on its file's time), or None."""
+    f = Path(work) / "colmap" / "project.json"
+    try:
+        m = f.stat().st_mtime
+    except OSError:
+        return None
+    c = _PROJECT_CACHE.get(str(f))
+    if c and c[0] == m:
+        return c[1]
+    try:
+        from ..sfm.project import SfmProject
+        proj = SfmProject.load(f.parent)
+    except Exception:                                           # noqa: BLE001 - then the whole block
+        proj = None
+    _PROJECT_CACHE[str(f)] = (m, proj)
+    return proj
+
+
+def regular_terrain(st: Dict[str, Any], label: str, work: PathLike, families: Optional[str] = None,
+                    near_m: float = REGULAR_NEAR_M):
+    """1.0.5 (Christian, 22 Nov 2026: "Run van zyl from the large or huge block, but limit the depth maps just to
+    the sites in the van zyl regular block. Do this for the others too to avoid excessivly large number of images
+    needed to processes ad depth maps"): the part of a LARGE or HUGE block whose frames make a station's terrain -
+    (name, patterns over the block's frame names, a line for the log) - or None: the whole block (a block that is
+    not large or huge, or nothing narrower could be told).
+
+    * the regular block of the same place (``van_zyl_overlook`` for ``van_zyl_overlook_huge``; the block's folder,
+      then the station's ``site``): when the station's sol is one of its sols, the frames of its sols - the site
+      definitions say which (a block is its sol ranges) - and the station's own;
+    * else (no regular block in the site definitions, or the station is not of its sols - Sol0816 of Belva Crater
+      Large, the Three Forks, Seitah, Bright Angel and Witch Hazel stations): the frames of the stations within
+      ``near_m`` of this one in the block's alignment priors, and its own.
+
+    The alignment is the large block's either way; only the depth maps and the cloud are fewer."""
+    import re
+    from ..waypoints.sites import in_sol_ranges, load_site_table, parse_work_folder, sol_ranges
+    names = []
+    try:
+        names.append(parse_work_folder(work)[0])
+    except Exception:                                           # noqa: BLE001
+        pass
+    names.append(st.get("site"))
+    names = [n for n in dict.fromkeys(names) if n and str(n).endswith(REGULAR_SUFFIXES)]
+    if not names:
+        return None
+    m = re.match(r"^\s*(\d+)_(\d+)\s*$", str(st.get("station") or ""))
+    own = [f"*_N{int(m.group(1)):03d}{int(m.group(2)):04d}*"] if m else []
+    sols = viewer_sols(st, label) or []
+    table = load_site_table()["sites"]
+    for n in names:
+        base = re.sub(r"_(large|huge)$", "", str(n))
+        site = table.get(base)
+        if not site or not sols or not all(in_sol_ranges(int(x), site["sols"]) for x in sols):
+            continue
+        pats = [f"???_{sol:04d}_*" for a, b in sol_ranges(site["sols"]) for sol in range(int(a), int(b) + 1)]
+        return base + (f"_{''.join(sorted(set(families.upper())))}" if families else ""), pats + own, \
+            f"the regular block {base} (sols {', '.join(f'{a}-{b}' for a, b in sol_ranges(site['sols']))}) of {n}"
+    if not m:
+        return None
+    proj = _block_project(work)
+    if proj is None:
+        return None
+    try:
+        from ..sfm.dense import nearby_station_images
+        nb = nearby_station_images(proj, str(st["station"]), float(near_m), families=(families or "N").upper())
+    except Exception:                                           # noqa: BLE001 - then the whole block
+        return None
+    toks = sorted(nb.get("stations") or {})
+    pats = own + [f"*_N{k[1:4]}{k[5:9]}*" for k in toks if re.match(r"^S\d{3}D\d{4}$", k)]
+    name = f"near{float(near_m):g}_S{int(m.group(1)):03d}D{int(m.group(2)):04d}" + (f"_{''.join(sorted(set(families.upper())))}" if families else "")
+    return name, pats, f"{len(toks)} station(s) within {float(near_m):g} m of it in {names[0]} (no regular block serves)"
+
+
 def mark_name(st: Dict[str, Any]) -> Optional[str]:
     """The block's name in a station's nadir mark: ``"mark_name"``, else its ``"name"`` without a trailing camera tag such
     as ``(Z34)`` (0.99.13, Christian, 17 Nov 2026: "The Zcam blue circles should have the same titles as the block name
@@ -391,8 +470,8 @@ def block_folder(st: Dict[str, Any], root: PathLike) -> Path:
 
 def block_roots() -> List[Path]:
     """1.0: the further blocks' roots of ``RPP_BLOCK_ROOTS`` (``D:\\rover_blocks;E:\\more``), those that exist."""
-    import os
-    raw = os.environ.get("RPP_BLOCK_ROOTS") or ""
+    from .. import env as rpp_env
+    raw = rpp_env.get("RPP_BLOCK_ROOTS") or ""
     return [Path(x.strip()) for x in raw.replace(",", ";").split(";") if x.strip() and Path(x.strip()).is_dir()]
 
 
@@ -420,6 +499,15 @@ def sol_order(labels: Sequence[str]) -> List[str]:
 def block_aligned(work: PathLike) -> bool:
     """0.99.28: the block has finished its alignment (``colmap/run_done.json``)."""
     return (Path(work) / "colmap" / "run_done.json").is_file()
+
+
+def block_busy(work: PathLike) -> Optional[int]:
+    """1.0.1: the pid of a run of the block that is going on (its ``mppp_status.json`` alive), else None.  A block
+    being processed or aligned again keeps the ``run_done.json`` of the run before while its images, masks and model
+    are rewritten; a station made from it then would mix the two."""
+    from ..runner import STATUS_FILE as RUN_STATUS, read_status
+    cur = read_status(Path(work) / RUN_STATUS)
+    return int(cur.get("pid") or 0) if cur and cur.get("alive") else None
 
 
 def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = None, labels: Optional[Sequence[str]] = None,
@@ -459,6 +547,7 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
     if unknown:
         raise KeyError(f"not in the config: {unknown} (there: {sorted(cfg['stations'])})")
     runs = []
+    navcam_of = {z: n for n, z in (companions or {}).items()}   # 1.0.6: a Mastcam-Z version's Navcam station
     for lab in todo:
         st = cfg["stations"][lab]
         work = block_folder(st, root)
@@ -471,13 +560,18 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
             #                                         chosen by --scale or --sequence can have context frames too)
         fa = fa + [str(x) for x in (cfg.get("dense_args") or []) + (st.get("dense_args") or [])]
         near = st.get("nearby_m", cfg.get("nearby_m"))          # 0.97.0: the neighbors' frames constrain the ground
-        bt = block_terrain(dict(st, terrain=terrain) if terrain else st, cfg)     # 0.99.43: --terrain for the run
+        reg = None
+        if terrain == "regular":                                # 1.0.5: the block's terrain, of a large block only a part
+            reg = regular_terrain(st, lab, work, bc)
+        bt = block_terrain(dict(st, terrain="block" if terrain == "regular" else terrain) if terrain else st, cfg)     # 0.99.43: --terrain for the run
         block = bt is not None                                       # 0.98.14 (Christian, 15 Nov 2026: "for rockytop use a
         #   model made from the full ncam block alignment"): the terrain from every Navcam frame of the block - one
         #   cloud (colmap/dense_block_N) shared by the block's stations; the panorama still from the station's frames
         if block:
             fa = frame_args(frames) + [str(x) for x in (cfg.get("dense_args") or []) + (st.get("dense_args") or [])] + ["--whole-block"]
-            if bt[0]:
+            if reg:                                             # 1.0.5: patterns over the block's frames
+                fa += (["--block-cameras", str(bc)] if bc else []) + ["--block-name", reg[0], "--block-images", *reg[1]]
+            elif bt[0]:
                 fa += ["--block-name", bt[0], "--block-images", *bt[1]]
             elif bc:
                 fa += ["--block-cameras", str(bc)]
@@ -522,7 +616,8 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
                     if nm:
                         argv += ["--site-name", str(nm)]
                 if step == "mesh" and block:                 # the block's cloud, not an older one of the station alone
-                    argv += ["--points", str(Path(work) / "colmap" / block_workspace(bt[0], None if bt[0] else bc) / "fused.ply")]
+                    ws_name = block_workspace(reg[0]) if reg else block_workspace(bt[0], None if bt[0] else bc)
+                    argv += ["--points", str(Path(work) / "colmap" / ws_name / "fused.ply")]
                 if step == "mesh" and (near or block):
                     argv += ["--keep-under-rover", f"{float(st.get('keep_under_rover_m', cfg.get('keep_under_rover_m', 0.25))):g}"]
                 argv += [str(x) for x in (cfg.get(f"{step}_args") or [])]      # 0.96.1: for every station
@@ -533,10 +628,15 @@ def plan(cfg: Dict[str, Any], root: PathLike, out_root: Optional[PathLike] = Non
                     argv += ["--eyes", "left", "right", "center"]        # pivot too, for rpp.ibr.rover_surface
                 if step == "ods" and station_mesh:       # 0.99.26: each variant's part of the station mesh
                     argv += ["--station-mesh-only" if station_mesh == "only" else "--station-mesh"]
+                    if v == "rover" and is_zcam_station(st):     # 1.0.6: its rover is the Navcam run's
+                        nav = navcam_of.get(lab) or next((k for k, o in cfg["stations"].items() if k != lab
+                                                          and not is_zcam_station(o) and o.get("station") == st.get("station")), None)
+                        if nav:
+                            argv += ["--rover-part-from", str(Path(out_root) / nav / "with_rover")]
                 cmds.append({"variant": v, "step": step, "argv": argv})
         runs.append({"label": lab, "code": station_code_of(st, lab), "old_label": st.get("old_label"),
                      "work": str(work), "out": str(base), "note": st.get("note", ""), "variants": vs,
-                     "commands": cmds})
+                     "terrain_part": reg[2] if reg else None, "commands": cmds})
     return runs
 
 
@@ -545,27 +645,70 @@ STATUS_FILE = "single_sites_status.json"
 INSTANCE: Dict[str, Optional[str]] = {"name": None}   # 0.99.50: --instance - its own status file (two runs at once)
 
 
-NOT_IN_CODE_KEY = ("single_sites.py", "web.py", "hf.py")     # the runner and the publishing (panos.json, Hugging Face)
+NOT_IN_CODE_KEY = ("single_sites.py", "web.py", "hf.py", "sketchfab.py",   # the runner and the publishing (panos.json, Hugging Face, Sketchfab)
+                   "station_mesh.py")                         # 1.0.5: the full 3D model has its own stamp (model_code)
+
+# 1.0.5: the code of these hashes makes the same meshes, maps and panoramas as the code of the hash they name, so a
+# station made by that one stands.  {this code's hash (code_hash()): the earlier key its records carry}.
+#   1.0.5 against 1.0.4 (9360937dcbf555b7): only the full 3D model changed - rpp/ibr/station_mesh.py, now out of the
+#   hash, and in rpp/ibr/ods.py the lines of the model made alone (--station-mesh-only: the panorama's sky read from
+#   its file, the color skins written).  The stations of the night of 21 Nov get their models again, nothing else.
+SAME_PRODUCTS: Dict[str, str] = {
+    "4f8e7d4b53eb5c2e": "9360937dcbf555b7",
+}
 
 
 def code_key() -> str:
+    """The key of the code the steps run: :func:`code_hash`, or the earlier key it is known to make the same products
+    as (:data:`SAME_PRODUCTS`)."""
+    h = code_hash()
+    return SAME_PRODUCTS.get(h, h)
+
+
+def code_hash() -> str:
     """A hash of the code the steps run (the ``rpp.ibr`` sources and the dense step's): a step is made again when it
     changes, not on every version number.  Not in it: this module and the publishing ones (:data:`NOT_IN_CODE_KEY`,
-    0.99.36: a change to the viewer's list no longer makes the meshes and panoramas again)."""
+    0.99.36: a change to the viewer's list no longer makes the meshes and panoramas again) and, from 1.0.5, the full
+    3D model's module, which stamps its own products (:func:`rpp.ibr.station_mesh.model_code`)."""
     import hashlib
     h = hashlib.sha1()
     here = Path(__file__).resolve().parent
-    for f in sorted(here.glob("*.py")) + [here.parent / "sfm" / "dense.py"]:
+    # 1.0.1: and what turns a product into a frame's values - the image, radiometry and Sun modules and the opacity
+    # table (a change there used to leave every panorama as it was)
+    more = [here.parent / n for n in ("image.py", "radiometry.py", "sun.py")] + sorted((here.parent / "data").glob("*taus*.csv"))
+    for f in sorted(here.glob("*.py")) + [here.parent / "sfm" / "dense.py"] + more:
         if f.is_file() and f.name not in NOT_IN_CODE_KEY:
             h.update(f.name.encode() + f.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()[:16]
 
 
-def step_key(argv: Sequence[str], before: str, code: str, inputs: Sequence[PathLike] = ()) -> str:
-    """The identity of one step's run: its command, the code, the step before it (``before``: that step's key) and
-    the size and time of the files it reads (the fused cloud for the mesh)."""
+def block_stamp(work: PathLike) -> str:
+    """1.0.1: what a station's products take from its block beside the cloud - the aligned model
+    (:func:`rpp.sfm.dense.model_stamp`) and the radiometric settings (:func:`rpp.ibr.linear16.radiometry_key`).  In
+    every step's key (:func:`step_key`): a block aligned again, or other brightness settings, make the station's
+    mesh, maps and panoramas again."""
+    from types import SimpleNamespace
+    from ..sfm.dense import model_stamp
+    from .linear16 import block_config, radiometry_key
+    root = Path(work) / "colmap"
+    model = None
+    for d in (root / "gui_native" / "sparse", root / "sparse" / "cahv_ba"):
+        model = model_stamp(d)
+        if model:
+            break
+    try:
+        rad = radiometry_key(block_config(SimpleNamespace(root=root, settings={})))
+    except Exception:                                            # noqa: BLE001 - a block without its settings file
+        rad = None
+    return f"model:{model}|radiometry:{rad}"
+
+
+def step_key(argv: Sequence[str], before: str, code: str, inputs: Sequence[PathLike] = (), block: str = "") -> str:
+    """The identity of one step's run: its command, the code, the step before it (``before``: that step's key), the
+    size and time of the files it reads (the fused cloud for the mesh) and, since 1.0.1, the block's model and
+    radiometric settings (``block``: :func:`block_stamp`)."""
     import hashlib
-    parts = [code, before, *map(str, argv)]
+    parts = [code, before, *map(str, argv)] + ([block] if block else [])
     for f in inputs:
         f = Path(f)
         parts.append(f"{f.name}:{f.stat().st_size}:{int(f.stat().st_mtime)}" if f.is_file() else f"{f.name}:-")
@@ -603,7 +746,60 @@ def station_done(run: Dict[str, Any]) -> bool:
             return False
         if rec.get("code") != _CODE_NOW():                 # 0.99.51 (Christian, 20 Nov 2026: "every site gets remade
             return False                                   # from the fusion up if it wasn't generated on the same code")
+        if rec.get("block") and run.get("work"):           # 1.0.1: nor on another alignment or other brightness (a
+            try:                                           # record of 1.0.1 has the block's stamp; one of before has
+                if rec["block"] != block_stamp(run["work"]):   # another code key and is not done anyway)
+                    return False
+            except Exception:                              # noqa: BLE001 - the block cannot be read: not done
+                return False
+        if _wants_model(run, v) and model_stale(vout, v):  # 1.0.5: nor with a full 3D model of other code
+            return False
     return True
+
+
+def steps_made(run: Dict[str, Any]) -> bool:
+    """1.0.5: True when every step of this planned station after the cloud ran with exactly these commands (the keys
+    :func:`run_all` would give them: the command, the code, the step before, the cloud's file, the block's stamp) and
+    ended well, and the full 3D model is of this code - stricter than :func:`station_done`, which asks only for a
+    panorama of this code (whatever the terrain it was made from)."""
+    if not station_done(run):
+        return False
+    base, work_ = Path(run["out"]), Path(run["work"])
+    code = code_key()
+    stamp = block_stamp(work_)
+    keys: Dict[str, str] = {}
+    ods_keys: List[str] = []
+    for c in run["commands"]:
+        v, step = c["variant"], c["step"]
+        if step == "dense":
+            continue
+        vout = base / ("with_rover" if v == "rover" else "")
+        clouds = sorted((work_ / "colmap").glob(f"dense_{run.get('code') or station_key(run['label'])}*/fused.ply")) if step == "mesh" else []
+        if step == "mesh" and "--points" in c["argv"]:
+            clouds = [Path(c["argv"][c["argv"].index("--points") + 1])]
+        tf = c["argv"][c["argv"].index("--terrain-from") + 1] if "--terrain-from" in c["argv"] else None
+        before = keys.get(v, "") + (json.dumps(_read(step_record(tf, "mesh")).get("key")) if tf else "")
+        if step == "ods":
+            before += "".join(ods_keys)
+        key = step_key(c["argv"], before, code, clouds, block=stamp)
+        keys[v] = key
+        if step == "ods":
+            ods_keys.append(key)
+        if not step_done(vout, step, key):
+            return False
+    return True
+
+
+def _wants_model(run: Dict[str, Any], variant: str) -> bool:
+    return any(c["step"] == "ods" and c["variant"] == variant and "--station-mesh" in c["argv"] for c in run.get("commands", []))
+
+
+def model_stale(vout: PathLike, variant: str) -> bool:
+    """1.0.5: True when the full 3D model's part of this variant (the terrain of the run without the rover, the rover
+    of the run with it) is not there or was made by other code (:func:`rpp.ibr.station_mesh.model_code`)."""
+    from . import station_mesh as SM
+    kinds = ("rover",) if variant == "rover" else (("scape", "terrain") if SM.SCAPE else ("terrain",))
+    return not SM.model_current(vout, kinds)
 
 
 def _CODE_NOW() -> str:
@@ -658,6 +854,9 @@ def busy_elsewhere(run: Dict[str, Any], mine: Sequence[str] = ()) -> bool:
         return False
 
 
+FIRST_ALIAS = {"oeb": "butler_landing", "octavia_e_butler": "butler_landing"}   # --first oeb: the landing site's block
+
+
 def run_order(runs: List[Dict[str, Any]], pairs: Optional[Dict[str, str]] = None, first: Sequence[str] = (),
               reverse: bool = False) -> List[Dict[str, Any]]:
     """0.99.50 (Christian, 20 Nov 2026: "always runs rockytop first and then goes to the end of the mission and runs
@@ -665,6 +864,7 @@ def run_order(runs: List[Dict[str, Any]], pairs: Optional[Dict[str, str]] = None
     others by sol - the latest first with ``reverse``; a Mastcam-Z version stays right after its Navcam station."""
     import re
     anchor = {z: n for n, z in (pairs or {}).items()}
+    names = [FIRST_ALIAS.get(str(f).lower(), str(f).lower()) for f in first]
 
     def sol(lab):
         m = re.match(r"^Sol(\d+)", str(lab))
@@ -673,9 +873,10 @@ def run_order(runs: List[Dict[str, Any]], pairs: Optional[Dict[str, str]] = None
     def key(r):
         a_ = anchor.get(r["label"], r["label"])
         own = next((x for x in runs if x["label"] == a_), r)
-        grp = 0 if any(f.lower() in Path(own["work"]).name.lower() for f in first) else 1
+        nm = Path(own["work"]).name.lower()                  # 1.0.3: the names of ``first`` in the order given
+        grp = next((i for i, f in enumerate(names) if f in nm), len(names))
         s_ = sol(a_)
-        return (grp, s_ if grp == 0 or not reverse else -s_, a_, r["label"] != a_)
+        return (grp, s_ if grp < len(names) or not reverse else -s_, a_, r["label"] != a_)
     return sorted(runs, key=key)
 
 
@@ -922,7 +1123,9 @@ def run_all(runs: List[Dict[str, Any]], out_root: PathLike, squares_only: bool =
                         before = keys.get(v, "") + (json.dumps(_read(step_record(tf, "mesh")).get("key")) if tf else "")
                         if step == "ods":                  # the second variant uses the first one's levels
                             before += "".join(ods_keys)
-                        key = step_key(c["argv"], before, code, clouds)
+                        if "stamp" not in run:                # 1.0.1: the block's model and radiometry
+                            run["stamp"] = block_stamp(work_)
+                        key = step_key(c["argv"], before, code, clouds, block=run["stamp"])
                         keys[v] = key
                         if step == "ods":
                             ods_keys.append(key)
@@ -930,6 +1133,16 @@ def run_all(runs: List[Dict[str, Any]], out_root: PathLike, squares_only: bool =
                             print(f"######## {run['label']} {v}: {step} is up to date - skipped (--force runs it again)", flush=True)
                             codes[v][step] = 0
                             mins.setdefault(v, {})[step] = None
+                            if step == "ods" and "--station-mesh" in c["argv"] and model_stale(vout, v):
+                                # 1.0.5: the panorama stands; its full 3D model is of other code - the model alone
+                                print(f"######## {run['label']} {v}: the full 3D model is made again (its code changed)", flush=True)
+                                _status(out_root, started=t_run, station=run["label"], variant=v, step="model",
+                                        since=time.strftime("%Y-%m-%dT%H:%M:%S"), done=done, stations=[r["label"] for r in runs])
+                                tm = time.time()
+                                rc = _run(["--station-mesh-only" if x == "--station-mesh" else x for x in c["argv"]], fh)
+                                codes[v]["model"] = rc
+                                mins[v]["model"] = (time.time() - tm) / 60
+                                done.append(f"{run['label']} {v} model: exit {rc}, {(time.time() - tm) / 60:.1f} min")
                             continue
                         step_record(vout, step).unlink(missing_ok=True)
                         ods_ran = ods_ran or step == "ods"     # the levels are new: the station's next panorama follows
@@ -939,7 +1152,7 @@ def run_all(runs: List[Dict[str, Any]], out_root: PathLike, squares_only: bool =
                         if rc == 0:
                             vout.mkdir(parents=True, exist_ok=True)
                             step_record(vout, step).write_text(json.dumps(
-                                {"key": key, "exit": 0, "argv": c["argv"], "code": code, "rpp": _rpp_version(),
+                                {"key": key, "exit": 0, "argv": c["argv"], "code": code, "block": run.get("stamp"), "rpp": _rpp_version(),
                                  "minutes": round((time.time() - t0) / 60, 2),
                                  "finished": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=1), encoding="utf-8")
                     mins.setdefault(v, {})[step] = (time.time() - t0) / 60
@@ -1023,6 +1236,15 @@ def add_parser(sub) -> None:
                    help="after the run, the stations' stereo JPEGs into DIR/panos and DIR/panos.json for the web "
                         "viewer (the page, rpp.viewer, is copied into DIR)")
     p.add_argument("--publish-only", action="store_true", help="with --publish or --upload: no steps, publish what --out holds")
+    p.add_argument("--sketchfab", action="store_true", help="1.0.6: after a station is published, its full 3D models "
+                   "(with the rover, and the terrain alone) to Sketchfab as DRAFTS - the account's API token from the "
+                   "environment variable RPP_SKETCHFAB_TOKEN; a failure never fails the run (rpp.ibr.sketchfab)")
+    p.add_argument("--sketchfab-license", default=None, metavar="SLUG", help="the license of new Sketchfab models (default: none set)")
+    p.add_argument("--sketchfab-test", action="store_true", help="1.0.6: nothing made - the token checked and the first "
+                   "named station that has a full 3D model uploaded as drafts; exit 0 when both went up")
+    p.add_argument("--page-only", action="store_true", help="1.0.5: only the viewer page (index.html, vendor/) of this "
+                   "installation into the viewer checkout (--publish DIR, default the RPV checkout), committed and "
+                   "pushed (--no-upload: not) - no station is touched")
     p.add_argument("--no-upload", action="store_true",
                    help="no upload, also when --upload is given (run_single_site_ibr.bat gives it)")
     p.add_argument("--upload", action="store_true",
@@ -1056,9 +1278,12 @@ def add_parser(sub) -> None:
                    help="the block terrain from the frames of these camera families (NFR: every engineering "
                         "camera of the block, every size, fused into one cloud - rpp dense --block-cameras; default: the "
                         "config's 'block_cameras', else Navcam alone)")
-    p.add_argument("--terrain", default=None, choices=("block", "own"),
+    p.add_argument("--terrain", default=None, choices=("block", "own", "regular"),
                    help="the terrain of every station of this run, whatever the config says - block: the whole "
-                        "block's cloud (also for the stations with a named terrain set); own: the station's own frames")
+                        "block's cloud (also for the stations with a named terrain set); own: the station's own frames; "
+                        "regular (1.0.5): as block, but of a LARGE or HUGE block only the frames of the regular block "
+                        "of the same place (its sols in the site definitions) or, where none serves, of the stations "
+                        f"within {REGULAR_NEAR_M:g} m - fewer depth maps, the same alignment")
     p.add_argument("--no-zcam", dest="zcam_companions", action="store_false", default=True,
                    help="without the Mastcam-Z 34 mm versions of the stations that have a Z34 360 (default, in a "
                         "run of the whole list - no station named, or --all: each is made right after its Navcam station)")
@@ -1069,6 +1294,8 @@ def add_parser(sub) -> None:
     p.add_argument("--poll-min", type=float, default=15.0, help="--wait-for-blocks: minutes between looks (default 15)")
     p.add_argument("--any-block", action="store_true",
                    help="run stations whose block has not finished its alignment too (default: skipped)")
+    p.add_argument("--check-done", action="store_true", help="1.0.5: nothing run - exit 0 when every station of the run "
+                   "is made as these arguments would make it (its steps and its full 3D model up to date), else 1")
     p.add_argument("--list", action="store_true", help="the stations of the config")
     p.add_argument("--dry-run", action="store_true", help="the commands, not run")
     p.add_argument("--install", metavar="DIR", default=None, help=f"write {BAT_NAME} (and make_square.bat) into DIR and stop")
@@ -1156,10 +1383,56 @@ def freeze_alive(root: PathLike) -> bool:
     return st.get("state") == "running" and age < 1800
 
 
+def page_only(web_dir: Optional[PathLike] = None, upload: bool = True) -> int:
+    """1.0.5 (Christian, 22 Nov 2026: "In the meantime, remove the sites that don't have any full 3d model" - the
+    page that hides them had to wait for a station to be made): the viewer page of this installation into the viewer
+    checkout, committed and pushed - no station is touched."""
+    from . import web
+    web_dir = Path(web_dir) if web_dir else Path(web.viewer_dir())
+    git_dir = web_dir / ".git"
+    plock = FileLock((git_dir if git_dir.is_dir() else web_dir) / PUBLISH_LOCK)
+    plock.acquire(what="the viewer page")
+    try:
+        if not web.install_viewer(web_dir):
+            print("the viewer page (rpp/viewer/index.html, vendor/) is not in this installation")
+            return 1
+        if not upload:
+            print(f"the viewer page is in {web_dir} (not uploaded)")
+            return 0
+        up = web.upload(web_dir, [])
+        print(("uploaded: " if up["ok"] else "NOT uploaded: ") + up["message"], flush=True)
+        return 0 if up["ok"] else 1
+    finally:
+        plock.release()
+
+
 def _single_sites_pass(a: argparse.Namespace) -> int:
     if a.install:
         print(f"written: {install(a.install)}")
         return 0
+    if getattr(a, "page_only", False):
+        return page_only(a.publish, upload=not getattr(a, "no_upload", False))
+    if getattr(a, "sketchfab_test", False):                      # 1.0.6: once, before a long run
+        from . import sketchfab as _sf
+        c = _sf.check()
+        print("single-sites --sketchfab-test:", c["message"], flush=True)
+        if not c["ok"]:
+            return 1
+        cfg_ = load_config(a.config)
+        root_ = Path(a.root or rpp_env.get("RPP_SCAPES") or r"D:\rover_blocks")
+        out_ = Path(a.out) if a.out else root_ / cfg_.get("out", "single_sites")
+        for lab in (a.labels or sol_order(list(cfg_["stations"]))):
+            if _sf.station_files(out_ / lab):
+                st_ = cfg_["stations"].get(lab) or {}
+                sols = viewer_sols(st_, lab) or []
+                name = f"Perseverance Sol {sols[0]}: {viewer_name(st_, lab)}" if sols else lab
+                r = _sf.upload_station(out_ / lab, lab, title=name, license_slug=getattr(a, "sketchfab_license", None))
+                print(r["message"], flush=True)
+                for v, m in r["models"].items():
+                    print(f"   {v}: {m.get('shading', '')}")
+                return 0 if r["ok"] and len(r["models"]) == 2 else 1
+        print(f"single-sites --sketchfab-test: no station with a full 3D model under {out_}")
+        return 1
     cfg = load_config(a.config)
     root = Path(a.root or rpp_env.get("RPP_SCAPES") or r"D:\rover_blocks")
     out_root = Path(a.out) if a.out else root / cfg.get("out", "single_sites")
@@ -1187,12 +1460,20 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
                 rover_surface=getattr(a, "rover_surface", False),
                 station_mesh="only" if getattr(a, "station_mesh_only", False) else getattr(a, "station_mesh", False),
                 companions=pairs, block_cameras=getattr(a, "block_cameras", None), terrain=getattr(a, "terrain", None))
+    if getattr(a, "check_done", False):                          # 1.0.5: made? (for a batch file)
+        left = [r["label"] for r in runs if not steps_made(r)]
+        print(f"single-sites --check-done: {len(runs) - len(left)} of {len(runs)} made" + (f"; not: {', '.join(left)}" if left else ""))
+        return 0 if not left else 1
     if getattr(a, "recolor", False):                            # 0.99.50: the stations made in the output root
         gone = [r for r in runs if not has_16bit(r)]
         runs = [r for r in runs if r not in gone]
         print(f"single-sites --recolor: {len(runs)} station(s) with their 16-bit panoramas"
               + (f", {len(gone)} without (not made yet, or before 0.99.38)" if gone else ""))
         a.any_block = True
+    under_run = [r for r in runs if block_busy(r["work"])]      # 1.0.1: a block under a run is left alone (also with
+    for r in under_run:                                         # --any-block); --wait-for-blocks comes back to it
+        print(f"single-sites: {r['label']} skipped - a run of its block {r['work']} is going on")
+    runs = [r for r in runs if r not in under_run]
     if not getattr(a, "any_block", False):                      # 0.99.28 (Christian, 18 Nov 2026: "The next ods should use
         late = [r for r in runs if not block_aligned(r["work"])]   # the post freeze blocks. Skip an ods site if the block
         for r in late:                                          # has not aligned yet")
@@ -1201,6 +1482,8 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
         if late:
             print(f"single-sites: {len(runs)} station(s) to run, {len(late)} skipped for blocks not aligned yet")
         a._late = [r["label"] for r in late] + [f"{k} (Z34?)" for k in (cfg.get("_zcam_pending") or {}) if pairs is not None]
+    if under_run:
+        a._late = list(getattr(a, "_late", [])) + [r["label"] for r in under_run]
     if getattr(a, "skip_done", False) and not getattr(a, "force", False) and not (a.squares_only or a.retone or a.publish_only):
         done_ = [r for r in runs if station_done(r)]             # 0.99.47 (Christian, 19 Nov 2026: "recolor_rpv.bat should
         for r in done_:                                          # skip sites already processed")
@@ -1231,7 +1514,7 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
         return 0
     if a.dry_run:
         for r in runs:
-            print(f"{r['label']}: {r['work']} -> {r['out']}")
+            print(f"{r['label']}: {r['work']} -> {r['out']}" + (f"  [terrain: {r['terrain_part']}]" if r.get("terrain_part") else ""))
             for c in r["commands"]:
                 print(f"   [{c['variant']}] python -m rpp " + " ".join(c["argv"]))
         return 0
@@ -1277,9 +1560,21 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
         plock = FileLock((git_dir if git_dir.is_dir() else Path(a.publish)) / PUBLISH_LOCK)
         plock.acquire(what="the viewer page")
         try:
-            return _publish_and_upload(labels, quiet, titles, use_hf, before)
+            msg = _publish_and_upload(labels, quiet, titles, use_hf, before)
         finally:
             plock.release()
+        if getattr(a, "sketchfab", False):                       # 1.0.6: drafts of the full 3D models; never fails the run
+            from . import sketchfab as _sf
+            for lab in labels:
+                try:
+                    t = titles.get(lab) or {}
+                    sols = t.get("sols") or []
+                    name = f"Perseverance Sol {sols[0]}: {t.get('site_name') or lab}" if sols else str(t.get("title") or lab)
+                    r = _sf.upload_station(Path(out_root) / lab, lab, title=name, license_slug=getattr(a, "sketchfab_license", None))
+                    print(r["message"], flush=True)
+                except Exception as e:                           # noqa: BLE001
+                    print(f"Sketchfab {lab}: failed ({type(e).__name__}: {e})", flush=True)
+        return msg
 
     def _publish_and_upload(labels, quiet, titles, use_hf, before):
         from . import web

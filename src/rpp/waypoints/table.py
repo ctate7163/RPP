@@ -37,6 +37,19 @@ WAYPOINTS_FILE = "M20_waypoints.json"
 MISSIONS = {"m2020": (WAYPOINTS_URL, WAYPOINTS_FILE),
             "msl": ("https://mars.nasa.gov/mmgis-maps/MSL/Layers/json/MSL_waypoints.json", "MSL_waypoints.json")}
 MARS_RADIUS_M = 3396190.0          # IAU 2000 Mars sphere used by the M2020 maps
+# 1.0.1 (Christian, 21 Nov 2026: "Why did the z34 images before sol 11 not run?"): stations the waypoint table does not
+# have, placed at the waypoint of the same rover position.  The landing frames of sols 1-12 are site 1 drive 52; the
+# table starts with site 3 drive 0 (sol 13), and the rover did not move until sol 14.  A frame placed through an
+# alias gets the looser prior of a station without its own waypoint (``rpp.sfm.reconstruction.is_unsurveyed``).
+STATION_ALIASES: Dict[str, Dict[Tuple[int, int], Tuple[int, int]]] = {"m2020": {(1, 52): (3, 0)}}
+
+
+def station_alias(site: int, drive: int, mission: str = "m2020") -> Optional[Tuple[int, int]]:
+    """The (site, drive) whose waypoint places ``(site, drive)`` (:data:`STATION_ALIASES`), or None."""
+    try:
+        return STATION_ALIASES.get(mission, {}).get((int(site), int(drive)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _mission(mission: str) -> Tuple[str, str]:
@@ -138,6 +151,11 @@ def _en(props: Dict[str, Any]) -> Optional[tuple]:
         return None
 
 
+def has_station(data: Dict[str, Any], site: int, drive: int) -> bool:
+    """Whether the table has a waypoint of (site, drive) itself (not through an alias)."""
+    return any(_int(_props(f), "site") == site and _int(_props(f), "drive") == drive for f in data.get("features", []))
+
+
 def waypoint_for_site_drive(data: Dict[str, Any], site: int, drive: int,
                             exact: bool = False) -> Optional[Dict[str, Any]]:
     """
@@ -149,9 +167,17 @@ def waypoint_for_site_drive(data: Dict[str, Any], site: int, drive: int,
     3. ``None`` if nothing qualifies.  Always returns the full feature
        (the legacy function returned the feature in case 1 but its
        'properties' in case 2).
+
+    A station of :data:`STATION_ALIASES` that the table lacks gets the waypoint of its alias (1.0.1).
     """
     feats = [(i, f) for i, f in enumerate(data.get("features", []))
              if _int(_props(f), "site") == site]
+    if not any(_int(_props(f), "drive") == drive for _, f in feats):
+        alias = station_alias(site, drive)          # 1.0.1: a station the table lacks, at its alias's waypoint
+        if alias is not None and alias != (site, drive):
+            got = waypoint_for_site_drive(data, alias[0], alias[1], exact=True)
+            if got is not None:
+                return got
     if not feats:
         return None
     hits = [f for _, f in feats if _int(_props(f), "drive") == drive]

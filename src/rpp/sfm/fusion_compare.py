@@ -24,6 +24,12 @@ THE VARIANTS (:data:`VARIANTS`)
 * ``filtered_two_pass``: both.
 * ``delaunay`` / ``filtered_delaunay`` (with ``--colmap EXE``): COLMAP's Delaunay mesher, which uses which cameras saw
   each point (``fused.ply.vis``), over the ``current`` / ``filtered`` cloud.
+* 1.0.1, ``--cloud NAME=PATH``: a cloud made elsewhere in the same alignment (a ``fused.ply`` or the workspace holding
+  it), e.g. the station's Navcam and Mastcam-Z 34 mm depth (``rpp dense WORK --station 26_1222 --cameras NZ --zooms 34
+  --prepare --stereo --fusion``: ``dense_S026D1222_NZ34``), meshed and scored the same way.
+
+Every variant's report also carries its mesh checks (:func:`rpp.ibr.mesh.mesh_checks`, 1.0.1): the spike-like
+triangles, the hole-fill sectors and the fill above the skyline.
 
 THE SCORE
 
@@ -197,9 +203,13 @@ def score_mesh(mesh_dir: PathLike, points: np.ndarray, rings: Sequence[float] = 
             row["median_m"] = round(float(np.median(dm[near])), 4) if near.any() else None
             row["p90_m"] = round(float(np.percentile(dm[near], 90)), 4) if near.any() else None
         out.append(row)
+    chk = (rep.get("fill") or {}).get("checks") or {}             # 1.0.1: the mesh checks
     return {"rings": out, "tie_points": int(len(P)), "triangles": int(len(F)),
             "agree_all": round(float(np.mean(d <= tau)), 4) if len(P) else None,
-            "points_meshed": rep.get("points_meshed"), "surface": (rep.get("surface") or {}).get("method")}
+            "points_meshed": rep.get("points_meshed"), "surface": (rep.get("surface") or {}).get("method"),
+            "spike_triangles": chk.get("spike_triangles"), "spike_sectors_deg": chk.get("spike_sectors_deg"),
+            "fill_above_skyline_sectors": chk.get("fill_above_skyline_sectors"),
+            "check_warnings": chk.get("warnings")}
 
 
 def verdict(base: Dict[str, Any], var: Dict[str, Any], min_points: int = MIN_RING_POINTS) -> Dict[str, Any]:
@@ -251,9 +261,11 @@ def _replace(argv: List[str], flag: str, value: Optional[str]) -> List[str]:
 def compare_station(label: str, root: PathLike, cfg: Optional[Dict[str, Any]] = None, variants: Sequence[str] = VARIANTS,
                     colmap_exe: Optional[str] = None, block_cameras: Optional[str] = "NF", terrain: Optional[str] = "block",
                     keep_maps: bool = False, filter_options: Optional[Dict[str, Any]] = None,
-                    python: Optional[str] = None, refuse: bool = False) -> Dict[str, Any]:
+                    python: Optional[str] = None, refuse: bool = False,
+                    clouds: Optional[Dict[str, PathLike]] = None) -> Dict[str, Any]:
     """The variants of one station (module docstring); returns and writes ``compare/<station>_comparison.json`` and
-    ``.md``.  ``refuse``: fuse the variants again even when their cloud is there with the same settings."""
+    ``.md``.  ``refuse``: fuse the variants again even when their cloud is there with the same settings.
+    ``clouds``: 1.0.1, further clouds by name (a fused.ply or its folder), meshed and scored as they are."""
     from ..ibr.single_sites import load_config
     from .depth_filter import FILTER_DEFAULTS
     cfg = cfg or load_config()
@@ -268,6 +280,14 @@ def compare_station(label: str, root: PathLike, cfg: Optional[Dict[str, Any]] = 
     if not colmap_exe:
         variants = [v for v in variants if v not in DELAUNAY_VARIANTS]
     variants = ["current"] + [v for v in dict.fromkeys(variants) if v != "current"]     # the reference first
+    given: Dict[str, Path] = {}
+    for name, pth in (clouds or {}).items():                     # 1.0.1: clouds made elsewhere
+        d = Path(pth)
+        d = d.parent if d.suffix.lower() == ".ply" else d
+        if not (d / "fused.ply").is_file():
+            raise FileNotFoundError(f"--cloud {name}: no fused.ply in {d}")
+        given[str(name)] = d
+    variants += [n for n in given if n not in variants]
     cmp_dir = ws / COMPARE_DIR
     cmp_dir.mkdir(exist_ok=True)
     settings = product_fusion(ws)
@@ -281,18 +301,19 @@ def compare_station(label: str, root: PathLike, cfg: Optional[Dict[str, Any]] = 
     lock.acquire(what=f"the block cloud of {ws.parent.parent.name}")
     try:
         return _compare(label, ws, cmp_dir, argv, variants, settings, fopts, report, colmap_exe, keep_maps, python,
-                        refuse, lock)
+                        refuse, lock, given)
     finally:
         lock.release()
 
 
-def _compare(label, ws, cmp_dir, argv, variants, settings, fopts, report, colmap_exe, keep_maps, python, refuse, lock):
+def _compare(label, ws, cmp_dir, argv, variants, settings, fopts, report, colmap_exe, keep_maps, python, refuse, lock,
+             given=None):
     from .depth_filter import filter_workspace
-    clouds: Dict[str, Path] = {"current": ws}
+    clouds: Dict[str, Path] = {"current": ws, **(given or {})}
     fdir = cmp_dir / "filtered"
     todo = {}                                                    # the variants whose cloud is to be fused
     for v in variants:
-        if v in ("current",) + DELAUNAY_VARIANTS:
+        if v in ("current",) + DELAUNAY_VARIANTS or v in (given or {}):
             continue
         want = {"settings": settings, "two_pass": v.endswith("two_pass"), "filter": fopts if v.startswith("filtered") else None}
         rec_f = cmp_dir / v / "rpp_compare_fusion.json"
@@ -372,13 +393,16 @@ def markdown(report: Dict[str, Any]) -> str:
                 r = report["variants"][v]["rings"][i]
                 cells.append(f"{r['agree']:.3f} / {r['p90_m']:.3f}" if r.get("agree") is not None and r.get("p90_m") is not None else "-")
             lines.append(f"| {rb['ring_m'][0]:g}-{rb['ring_m'][1]:g} m | {rb['tie_points']} | " + " | ".join(cells) + " |")
-    lines += ["", "| variant | verdict | triangles | why |", "|---|---|---|---|"]
+    lines += ["", "| variant | verdict | triangles | spikes | fill above skyline | why |", "|---|---|---|---|---|---|"]
     for v, s in report["variants"].items():
         if "error" in s:
-            lines.append(f"| {v} | failed | - | {s['error'][-120:].strip()} |")
+            lines.append(f"| {v} | failed | - | - | - | {s['error'][-120:].strip()} |")
             continue
         why = "; ".join(s.get("worse") or s.get("better") or []) or ("the reference" if v == "current" else "")
-        lines.append(f"| {v} | {s.get('verdict', 'reference')} | {s.get('triangles')} | {why} |")
+        sp = s.get("spike_triangles")
+        sk = s.get("fill_above_skyline_sectors")
+        lines.append(f"| {v} | {s.get('verdict', 'reference')} | {s.get('triangles')} | {'-' if sp is None else sp} | "
+                     f"{'-' if sk is None else sk} | {why} |")
     fr = report.get("filter_result") or {}
     if fr.get("totals"):
         t = fr["totals"]
@@ -400,9 +424,10 @@ def main(a) -> int:
         fo["max_range_m"] = {k.upper(): float(v) for k, v in (x.split("=", 1) for x in a.max_range)}
     dirs = set()
     for lab in a.stations:                                       # the block's maps kept until its last station
+        given = dict(x.split("=", 1) for x in (getattr(a, "cloud", None) or []))     # 1.0.1
         rep = compare_station(lab, root, cfg, variants=a.variants or VARIANTS, colmap_exe=a.colmap,
                               block_cameras=a.block_cameras, terrain=a.terrain, keep_maps=True,
-                              filter_options=fo, refuse=a.refuse)
+                              filter_options=fo, refuse=a.refuse, clouds=given)
         dirs.add(Path(rep["workspace"]) / COMPARE_DIR)
         print(markdown(rep))
     if not a.keep_maps:

@@ -599,7 +599,8 @@ def test_dense_stereo_goes_to_the_pipelines_gpu_python(tmp_path, monkeypatch):
     assert kw["workspace"].endswith("dense_S003D0010") and len(kw["images"]) == 4
     from rpp.sfm.dense import (PATCH_MATCH_SOURCES, STATION_FUSION_OPTIONS, STATION_FUSION_STRICT, STATION_STEREO_FAST,
                                STATION_STEREO_OPTIONS, STEREO_RECORD)
-    fast = {**STATION_STEREO_OPTIONS, **STATION_STEREO_FAST}           # 1.0: new maps with the sparser window,
+    from rpp.sfm.dense import STATION_DEPTH_RANGE
+    fast = {**STATION_STEREO_OPTIONS, **STATION_STEREO_FAST, **STATION_DEPTH_RANGE}   # 1.0.1: + the depth range           # 1.0: new maps with the sparser window,
     assert kw["stereo_options"] == fast and kw["fusion_options"] == STATION_FUSION_OPTIONS
     assert kw["sources"] == PATCH_MATCH_SOURCES and kw["fusion_strict"] is None    # 12 sources; one fusion by default
     calls.clear()
@@ -609,7 +610,7 @@ def test_dense_stereo_goes_to_the_pipelines_gpu_python(tmp_path, monkeypatch):
     assert rpp_main(["dense", str(root.parent), "--station", "3_10", "--stereo", "--min-angle", "1.5", "--min-views", "3"]) == 0
     kw = calls[0][2]
     assert kw["stereo_options"] == {"min_triangulation_angle": 1.0, "filter_min_triangulation_angle": 1.5,
-                                    "filter_min_num_consistent": 2, **STATION_STEREO_FAST}
+                                    "filter_min_num_consistent": 2, **STATION_STEREO_FAST, **STATION_DEPTH_RANGE}
     assert kw["fusion_options"] == {"min_num_pixels": 3}
     # 0.98.14: --whole-block - the block's frames in one shared workspace, the station's own frames recorded beside it
     calls.clear()
@@ -2787,7 +2788,8 @@ def test_context_frames_are_masked_fill_only_and_stay_off_the_rover(tmp_path):
     assert cfg["stations"]["Sol0052"]["context"][:2] == ["NLF_0052_0671561864_884RAD_N0032016NCAM00301_0A0295J01.png",
                                                                    "NRF_0052_0671561864_884RAD_N0032016NCAM00301_0A0295J01.png"]
     assert cfg["stations"]["Sol0052"]["context"][2:] == ["N?F_0049_0671300154_616RAD_N0031940NCAM00302_*.png",   # 1.0: sol 49,
-                                                         "N?F_0049_0671302488_426RAD_N0031950NCAM03049_*.png"]  # not sol 33
+                                                         "N?F_0049_0671302488_426RAD_N0031950NCAM03049_*.png",  # not sol 33
+                                                         "N?F_0049_0671302876_881RAD_N0031950NCAM02049_*.png"]  # 1.0.1: behind the rover
 
 
 def test_geometry_panoramas_masked_black_and_image_copies(tmp_path):
@@ -3165,21 +3167,18 @@ def test_welcome_picture_keeps_its_color_and_the_map_gets_an_orthomosaic(tmp_pat
     cv2.imwrite(str(w / "panos" / "S_360_3DTD.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 98])
     (w / "panos" / f"{web.WELCOME_ID}{web.STACK}").write_bytes(b"old gray one")
     e = web.welcome_pano(w, {"variants": [{"views": {"standard": "panos/S_360_3DTD.jpg"}}]})
-    f = w / e["variants"][0]["views"]["standard"]
-    m = cv2.imread(str(f)).reshape(-1, 3).mean(axis=0)
-    assert "muted" in f.name and not (w / "panos" / f"{web.WELCOME_ID}{web.STACK}").exists()
-    assert m[2] - m[0] > 60 and (m[2] - m[0]) < 0.75 * 160                    # still orange, less so
-    # 0.99.38 (Christian, 19 Nov 2026: "the welcome screen should now have the same color products as Van zyl"): every
-    # view of the terrain-only variant, muted; a view without its picture here keeps the one made before
-    cv2.imwrite(str(w / "panos" / "S_dcs_360_3DTD.jpg"), img)
+    # 1.0.1 (Christian, 21 Nov 2026: "remove the gray tone of the welcome screen version of vanzyl. Instead, use the Raw
+    # color as the first skin"): Van Zyl's own pictures - no muted copy, the copies of before removed, raw color first
+    assert e["variants"][0]["views"] == {"standard": "panos/S_360_3DTD.jpg"}
+    assert not (w / "panos" / f"{web.WELCOME_ID}{web.STACK}").exists()
+    (w / "panos" / f"{web.WELCOME_ID}_muted{web.STACK}").write_bytes(b"the muted one of 1.0")
     vz = {"variants": [{"key": "rover", "views": {"standard": "panos/R_360_3DTD.jpg"}},
-                       {"key": "masked", "views": {"standard": "panos/S_360_3DTD.jpg", "dcs color": "panos/S_dcs_360_3DTD.jpg",
-                                                   "normal map": "panos/S_normal_360_3DTD.jpg"}}]}
-    e2 = web.welcome_pano(w, vz)
-    assert e2["variants"][0]["views"] == {"standard": f"panos/{web.WELCOME_ID}_muted{web.STACK}",
-                                          "dcs color": f"panos/{web.WELCOME_ID}_dcs_color_muted{web.STACK}"}
-    (w / "panos" / "S_dcs_360_3DTD.jpg").unlink()
-    assert "dcs color" in web.welcome_pano(w, vz)["variants"][0]["views"]     # made before: kept
+                       {"key": "masked", "views": {"standard": "panos/S_360_3DTD.jpg", "raw color": "https://x/S_raw_360_3DTD.jpg",
+                                                   "dcs color": "panos/S_dcs_360_3DTD.jpg"}}]}
+    e2 = web.welcome_pano(w, vz)                # every variant of Van Zyl's entry, its own files; a copy, not the entry
+    assert [v["key"] for v in e2["variants"]] == ["rover", "masked"] and e2["welcome"] and e2["welcome_of"] is None
+    assert e2["variants"][1]["views"]["raw color"] == "https://x/S_raw_360_3DTD.jpg" and e2["variants"] is not vz["variants"]
+    assert not list((w / "panos").glob("welcome*")) and (w / "panos" / "S_360_3DTD.jpg").is_file()
     # the map's picture
     rasterio = pytest.importorskip("rasterio")
     pytest.importorskip("pyproj")
@@ -3268,7 +3267,7 @@ def test_o_looks_along_the_rover_x_and_y_b_home_buttons(tmp_path):
     assert "#compass { position: fixed; right: 12px; top: 8px;" in page and "-Math.PI / 4" not in page
     assert "TEXT_FROM_FORWARD_DEG = 135" in page and "rover_forward_azimuth_deg" in page
     assert 'id="home"' in page and "goHome" in page and "faceAfterLoad = 270" in page
-    assert "pressed(src, 5)" in page and "if (left) goHome(); else stereoOrFull();" in page     # 0.99.41: B stereo / full 3D
+    assert "if (!yDone) goHome();" in page and "if (!bDone) stereoOrFull();" in page     # Y: home; 0.99.41: B stereo / full 3D (1.0.5: a short press; held, the drive)
     assert "q.key === 'masked'" in page and "#VRButton.rpv-big" in page and "isSessionSupported('immersive-vr')" in page
     assert "`Sol ${sols[0]}`" in page and "`sol ${" not in page
 
@@ -3354,7 +3353,7 @@ def test_stations_of_16_nov_and_context_patterns(tmp_path):
     c = st["Sol1308"]["context"]
     assert {n.split("_")[1] for n in c} == {"1307", "1308"} and sum("NCAM00301" in n for n in c) == 4 and len(c) == 22
     assert st["Sol0609"]["site"] == "hidden_harbor" and st["Sol0609"]["context"] == ["N?F_0606_*RAD_N0301096NCAM*"]
-    assert sum("_0033_" in n for n in st["Sol0052"]["context"]) == 0 and sum("_0049_" in n for n in st["Sol0052"]["context"]) == 2
+    assert sum("_0033_" in n for n in st["Sol0052"]["context"]) == 0 and sum("_0049_" in n for n in st["Sol0052"]["context"]) == 3
     have = {"NLF_0606_0001_222RAD_N0301096NCAM03606_0A0195J01.png", "NLF_0609_0002_222RAD_N0301172NCAM03609_0A0195J01.png"}
     assert expand_names(["N?F_0606_*RAD_N0301096NCAM*.png", "nope*.png"], have) == ["NLF_0606_0001_222RAD_N0301096NCAM03606_0A0195J01.png", "nope*.png"]
     runs = SS.plan(cfg, tmp_path, labels=["Sol0609"])
@@ -3899,3 +3898,50 @@ def test_one_skyline_and_a_smooth_sky():
     assert rgb[120, 600, 0] > 150                                                  # the floater is sky
     assert rgb[hr[len(hr) // 2], hc[len(hc) // 2], 0] < 120                        # the speck has the hills' color
     assert np.ptp(s[:, ::90], axis=1).max() < 6                                    # smooth in azimuth near the zenith
+
+
+def test_the_sky_fit_is_held_above_the_frames_and_islands_take_their_rim():
+    """1.0.6 (Christian, 22 Nov 2026): the sky fit is not extrapolated above the sky the frames saw ("the top pole has
+    artifacts in the sky" - Rockytop's dark red patch at 50-75 deg); and a small island that only a frame of another
+    place or time colors takes its rim's colors ("the white disc at Van Zyl's rock")."""
+    from rpp.ibr import ods as O
+    from rpp.ibr.raycast import LABEL_FAR, LABEL_MESH
+    H, W = 360, 720
+    el = 90.0 - (np.arange(H)[:, None] + 0.5) / H * 180.0
+    az = (np.arange(W)[None, :] + 0.5) / W * 2 * np.pi
+    label = np.where(el > 2.0, LABEL_FAR, LABEL_MESH).astype(np.uint8) * np.ones((1, W), np.uint8)
+    elw = np.broadcast_to(el, (H, W))
+    base = 150.0 + 30.0 * np.cos(np.radians(elw)) * (1.0 + 0.25 * np.cos(az) + 0.15 * np.sin(2 * az))   # azimuth structure
+    rgb0 = np.stack([base * 1.05, base, base * 0.92], axis=-1)
+    rgb0[elw <= 2.0] = 60.0
+    source = np.where((elw > 2.0) & (elw < 30.0) | (elw <= 2.0), 0, -1).astype(np.int16)   # the frames see the sky to 30 deg
+    results = {}
+    for hold in (False, True):
+        O.SKY_HOLD = hold
+        try:
+            rgb = rgb0.astype(np.uint16).copy()
+            assert O.skyline_sky(rgb, label, source)
+        finally:
+            O.SKY_HOLD = True
+        up = rgb[elw[:, 0] > 50.0].astype(float)
+        results[hold] = (float(up.max()), float(up.min()), float(np.ptp(up[:, :, 1], axis=1).max()))
+    seen_range = (float(rgb0[(elw > 2) & (elw < 30)].min()), float(rgb0[(elw > 2) & (elw < 30)].max()))
+    hi, lo, spread = results[True]
+    assert seen_range[0] - 10 < lo and hi < seen_range[1] + 10                      # within what the frames saw
+    assert spread < 3.0                                                            # one color per row up high
+    assert results[False][2] > spread                                              # (without the hold: the harmonics run on)
+    # islands
+    H, W = 1800, 3600                                                              # 10 px per degree
+    rgb = np.full((H, W, 3), 50, np.uint8)
+    source = np.zeros((H, W), np.int16)
+    label = np.full((H, W), LABEL_MESH, np.uint8)
+    rgb[1250:1256, 300:306] = 220                                                  # a light disc of 0.36 deg2 ...
+    source[1250:1256, 300:306] = 1                                                 # ... from a context frame
+    rgb[1100:1200, 500:600] = 120
+    source[1100:1200, 500:600] = 1                                                 # a large area of it: stays
+    import types
+    srcs = [types.SimpleNamespace(context=False, fill_only=False), types.SimpleNamespace(context=True, fill_only=True)]
+    rep = O.fill_islands(rgb, source, label, srcs)
+    assert rep["islands"] == 1 and rep["px"] == 36
+    assert int(rgb[1250:1256, 300:306].max()) <= 52 and (source[1250:1256, 300:306] == -6).all()
+    assert (rgb[1100:1200, 500:600] == 120).all()

@@ -106,7 +106,7 @@ STALE_S = 900
 LOGON_TASK = "RPP freeze"
 OLD_LOGON_TASK = "MPPP freeze"      # 0.99.3: the RunOnce value of a v0p98 freeze (freeze_097 set it): removed when a v0p99
 #                                   run sets its own, so a reboot starts one freeze, not two
-REQUIRED_VERSION = "1.0"            # 0.99.3 (Christian, 16 Nov 2026: "Is there anything preventing freeze3 from running on v0p99?"):
+REQUIRED_VERSION = "1.0"              # 0.99.3 (Christian, 16 Nov 2026: "Is there anything preventing freeze3 from running on v0p99?"):
 #                                   the run on v0p99 - its own checkout D:\code\RPP_freeze on branch rpp (scripts\windows\
 #                                   freeze.bat of D:\code\RPP); v0p98's freeze runs from D:\code\MPPP_freeze ("0.98" there)
 DEFAULT_MASK = "rpp_mask_v5"         # the registry default: what a block without mask_checkpoint was processed with
@@ -143,6 +143,15 @@ class Run:
             a.candidate = rec["candidate"]
         if not read_only:
             self.status["models"] = {"cmods": str(a.cmods), "candidate": a.candidate}
+        # 1.0.1 (Christian, 21 Nov 2026: "Only rerun the seitah and the dark blocks"): the zjoints step's site runs for
+        # these sites alone; kept with the run, so a restart at logon (no arguments) does not run every block.
+        # "all" on the command line ends it
+        zs = getattr(a, "zcam_sites", None)
+        if zs is None:
+            zs = list(self.status.get("zcam_sites") or []) if self.resumed else []
+        a.zcam_sites = [] if [str(x).lower() for x in zs] == ["all"] else list(zs)
+        if not read_only:
+            self.status["zcam_sites"] = list(a.zcam_sites)
         self.code = Path(a.code).resolve()
         self.cmods = Path(a.cmods)
         self.redo = set(a.redo or [])
@@ -344,7 +353,17 @@ class Run:
     # --------------------------------------------------------------- the mask model
     def mask_set(self) -> Optional[str]:
         """The ``mask_checkpoint`` setting of every pipeline call: None when the blocks' own model stays."""
-        return (self.status.get("mask") or {}).get("set") or None
+        m = self.status.get("mask") or {}
+        if m.get("set"):
+            return m["set"]
+        # 1.0.1 (21 Nov 2026, freeze 3 continued on 1.0.1: every block failed in a minute, "mask model 'rpp_mask_v5'
+        # is not in the cache"): a run whose chosen model is the blocks' own checkpoint FILE recorded no setting
+        # ("same"), and the site runs then took the code's default - a registry name, another configuration, and
+        # one that is not on this computer.  The blocks' own file is set explicitly, as "keep" always did
+        cur = m.get("current")
+        if cur and Path(str(cur)).suffix.lower() in (".pt", ".pth", ".safetensors") and Path(str(cur)).is_file():
+            return str(cur)
+        return None
 
     def s_mask(self) -> str:
         a = self.a
@@ -547,6 +566,12 @@ class Run:
             args += ["--zcam-waive-aspect", *map(str, self.a.zcam_waive_aspect)]
         if getattr(self.a, "zcam_one_block", None):
             args += ["--zcam-one-block", *map(str, self.a.zcam_one_block)]
+        if getattr(self.a, "zcam_sites", None):
+            # the pipeline aligns these sites alone; the joints take the other sites' finished blocks as they are
+            # (aligned with the Mastcam-Z models before today's promotions; zfinal runs every block on the final ones)
+            self.log(f"zjoints: site runs for {len(self.a.zcam_sites)} site(s) only (--zcam-sites): "
+                     f"{', '.join(self.a.zcam_sites)}")
+            args += ["--zcam-sites", *self.a.zcam_sites]
         rc = self.pipeline("zjoints", *args)
         since = str(self.status.get("started") or "")                 # the joints of this run, also after a restart
         lines = "; ".join(self.zjoint_lines(since=since))
@@ -1126,6 +1151,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed-from", default=None, metavar="ROOT",
                     help="0.99.22: a new root - the Mastcam-Z backlash lists (zcam_low_backlash_found.csv, "
                          "zcam_focus_from_below.csv) copied from this root when --root has none")
+    ap.add_argument("--zcam-sites", nargs="+", default=None, metavar="SITE",
+                    help="1.0.1: the zjoints step runs these sites alone (run_pipeline --zcam-sites); the joints take the "
+                         "other sites' finished blocks as they are.  Kept with the run; 'all' ends it.  zfinal runs "
+                         "every site")
     ap.add_argument("--no-knee-stations", dest="knee_stations", action="store_false",
                     help="0.99.5: the knee step without new deck stations (the profile only)")
     ap.add_argument("--knee-sols", type=int, nargs=2, default=list(KNEE_SOLS), metavar=("FIRST", "LAST"))

@@ -1984,9 +1984,9 @@ def block_table_markdown(rows: Sequence[Dict[str, Any]], focal_limit_ppm: float 
                 f"{r['rig_yaw_mdeg']:+.1f} {r['rig_pitch_mdeg']:+.1f} {r['rig_roll_mdeg']:+.1f}")
         L.append(f"| {r['block']} | {r['sol']:.0f} | {r['T']:+.1f} | {r['images']} | {r['bins']} | "
                  f"{_p(r, 'NL_fx_ppm', 'NL_fy_ppm', '+.0f')} | {_p(r, 'NL_cx_px', 'NL_cy_px', '+.2f')} | "
-                 f"{'-' if r.get('NL_k1_1e3') is None else f'{r['NL_k1_1e3']:+.3f}'} | "
+                 f"{'-' if r.get('NL_k1_1e3') is None else format(r['NL_k1_1e3'], '+.3f')} | "
                  f"{_p(r, 'NR_fx_ppm', 'NR_fy_ppm', '+.0f')} | {_p(r, 'NR_cx_px', 'NR_cy_px', '+.2f')} | "
-                 f"{'-' if r.get('NR_k1_1e3') is None else f'{r['NR_k1_1e3']:+.3f}'} | {rigs} | "
+                 f"{'-' if r.get('NR_k1_1e3') is None else format(r['NR_k1_1e3'], '+.3f')} | {rigs} | "
                  f"{'yes' if ok else '**no**'} |")
     L.append("")
     L.append(f"Refined minus the joint model at each bin's temperature and the block's sol; agrees: |fx, fy| ≤ "

@@ -1,5 +1,5 @@
 ---
-title: 'MPPP: beyond the stereo baseline with Mars rover images'
+title: 'Rover Photogrammetry Pipeline (MPP): beyond the fixed stereo baseline for Mars rover images'
 tags:
   - Python
   - planetary science
@@ -14,68 +14,177 @@ authors:
 affiliations:
   - name: Malin Space Science Systems, San Diego, CA, USA
     index: 1
-date: 20 October 2026
+date: 20 November 2026
 bibliography: paper.bib
 ---
-
 # Summary
-
-Every time a Mars rover stops, it sees Mars from a new viewpoint that could combine with other nearby stops. Yet there is no software that automatically combines these complimetnary views. The Mars 2020 Perseverance rover [@Farley:2020] captures the Martian landscape in stereo at every stop, and often with 360° panoramas [@Bell:2021; @Maki:2020]. Although these images and their metadata are publicly available through NASA's Planetary Data System (PDS), they are in a PDS format that is not easily used in common 3D reconstruction software. If properly preprocessed, however, these image sets can fuse into 3D models using structure from motion (SfM) tools such as COLMAP [@Schoenberger:2016] or Agisoft Metashape [@Agisoft:2024]. MPPP, the Mars Photogrammetry Preprocessing Pipeline (MPPP), fills this gap with a PDS-to-SfM pipeline.
-
+ 
+Each time a Mars rover parks, its mast cameras photograph the landscape in stereo, often in a full 360° panorama
+[@Maki:2020; @Bell:2021]. The Mars 2020 Perseverance rover [@Farley:2020] has done this at hundreds of stops, and the
+images are released to NASA's Planetary Data System (PDS). These images are not yet easy to use as 3D content: they are
+in PDS formats, their camera models are in a convention that common 3D software does not read, and the rover's own
+hardware fills part of most frames.
+ 
+The Rover Photogrammetry Pipeline (RPP) turns these archive images into true-scale 3D assets that anyone can load: a
+stereo 360° panorama and a textured 3D model of the terrain around each rover stop, and aligned point clouds and meshes
+for groups of nearby stops. The outputs are plain files in open formats (PNG, JPEG, glTF, COLMAP projects and JSON),
+each with a record of the PDS products and the code version that made it. RPP is written in Python and runs from
+resumable commands over a list of rover stops.
+ 
 # Statement of need
-
-The target audience for MPPP is the Mastcam-Z Stereo-DTM working group and other researchers who model Mars' 3D terrain. Fixed-baseline stereo gives each rover stop its own range map; MPPP lets images from nearby rover stops triangulate to better see and interpret the trerrain.
-
-The same alignments are measurements of the cameras. Each block solution refines the focal lengths, principal points, distortion terms and stereo rig of the cameras that imaged it, with an image-measurement precision near 0.2 px, so a collection of blocks across the mission becomes a calibration data set that no single sol can provide. MPPP uses this feature in both directions: block solutions constrain camera model forms and parameters and measure how they vary with temperature, focus and time since landing. The refined models are then versioned, checked across blocks, and fed back as the default cameras for the next run. A follow-on study will use this machinery to tie a Mastcam-Z calibration to a refined Navcam calibration and to measure how camera-model error propagates into 3D reconstruction error.
-
-At the other end of the pipeline, an aligned block is the foundation for accurate 3D models that can be used for both quantitative measurement and quantiative exploration. MPPP emphasizes terrain realism and data provenance so that its products are both visually consistent and scientifcally interpepable: colors come from radiometrically calibrated products under one convention, scale comes from the rover's own localization, and every model traces back to the PDS product identifiers and the code version that made it. The result is useful alike to scientists who want to see the rocks in context and to space enthusiasts who want to see real Marsion landscapes. The Jezero crater landscape models published on Sketchfab [@Tate:Sketchfab] were preprocessed with MPPP; the models before 2026 were aligned in Agisoft Metashape, whereas the current pipeline aligns in COLMAP 4.
-
+ 
+RPP is for researchers who want real Mars terrain in their own applications: scientists who want to see rocks in
+context, educators and developers who build virtual-reality or browser experiences, and robotics groups that need
+realistic terrain for simulation and training data. These users need 3D assets they can trust, not a photogrammetry
+project to set up.
+ 
+No open tool takes them from the archive to such assets. PDS readers, structure-from-motion (SfM) and multi-view
+stereo engines, and renderers exist separately. Between them are rover-specific problems: removing the rover from
+the images, replacing the mission's camera models with models that common software reads, putting the images of many
+stops into one frame in meters, and making the colors of different cameras and times of day agree. RPP solves these
+in code and connects the steps end to end (Figure 1). To our knowledge, it is the first open pipeline from public
+rover archive products to aligned multi-station reconstructions and viewer-ready stereo panoramas and 3D models.
+ 
+Three properties make the results usable beyond one site or one viewer:
+ 
+- **Trustworthy geometry and color.** Assets are in true scale, oriented east-north-up, colored from
+  radiance-calibrated images under one documented convention, and traceable to their source products.
+- **Open outputs at every stage.** Processed images, aligned blocks and station assets are plain files that 3D
+  software, game engines and web viewers read.
+- **More than one rover and camera.** RPP supports Perseverance's Navcam, Hazcam and Mastcam-Z cameras; Curiosity
+  support is experimental. The method applies to any rover whose images come with
+  localization and camera models.
+The same pipeline serves a second audience, researchers who study the cameras and the reconstructions themselves.
+Every aligned block is also a measurement of the cameras. RPP's versioned camera, stereo-rig and mast models were
+solved from such blocks. They vary with temperature, focus, zoom and sol, and they become the defaults for the next
+run. Tie points and depth maps are kept for reconstruction-error analysis. These uses are described in follow-on
+papers; this paper describes the software.
+ 
 # State of the field
-
-Several tools process rover data into depth maps, point clouds or 3D models: VICAR [@VICAR], PRoViP [@Barnes:2018] and the Ames Stereo Pipeline [@Beyer:2018]. They reconstruct from primarily from fixed-baseline stereo pairs without leveraging multi-view image coregistation. Although PRoViP can fuse stereo products from several rover positions and the Ames Stereo Pipeline can bundle-adjust multiple images, neighter offers an open path from the archive to SfM. The nearest relative is the Metashape workflow of @Schmauss:2025 for Curiosity's Mastcam and Navcam images, which embeds the camera metadata in image tags and builds a digital outcrop model of Mont Mercou; MPPP is the Mars 2020 counterpart, with the masking, camera-model translation and prior-weighted bundle adjustment done in code and the alignment in COLMAP.
-
-SfM requires numerous overlapping images for a robust 3D reconstruction, and it often fails with rover images because their image sets are sparse. Fortunately, some of Perseverance's image sequences are amenable to SfM because they come from neighboring rover locations less than 10 meters apart. We call such a set of complementary rover locations a block. Several dozen blocks of four or more end-of-drive panoramas have accumulated over the first 2,000 sols, and the rover is parked within 10 m of three or more earlier or later stops on about 20 % of sols. These blocks fuse into intricate and expansive 3D models of the Martian terrain.
-
-# Pipeline
-
-MPPP runs as one resumable command over a batch of sites. Its bundle adjustment carries waypoint position and attitude priors, resolution-aware weighting and stereo rigs, starts from the label CAHV cameras or from versioned camera models, and takes its color processing parameters from a configuration file. Five processes take Perseverance rover images from PDS inputs to SfM outputs:
-
-1. loading radiance-calibrated images in PDS format and harmonizing their colors between instruments and their brightness between times of day;
-2. masking rover hardware in the frame and rover shadows cast on the terrain;
-3. converting CAHV, CAHVOR and fisheye CAHVORE camera models to COLMAP camera models and placing each station in a local east-north-up frame with true scale in meters;
-4. assembling the COLMAP project and running feature matching and prior-weighted bundle adjustment;
-5. exporting points clouds, camera parameters, and undistorted images for further analysis.
-
-MPPP loads PDS data and metadata with the Planetary Data Reader [@Brown:2024]. Color processing applies a static RGB rescaling so that Navcam, Hazcam, Mastcam-Z and WATSON images roughly match; the current release primarily supports Navcam and Mastcam-Z at the 34 mm focal length. Time-of-day and weather-related changes in illumination are modeled with zenith scaling and an approximate atmospheric opacity correction [@TODO:opacity].
-
-Rover masking is necessary because the rover body is usually the most reliable feature in every frame: its features are static from stop to stop, so a matcher ties images together on the rover rather than on the terrain. To correct this, we fine-tune a ConvNeXt-tiny convolutional neural network (CNN) [@Liu:2022; @Wightman:2019; @Paszke:2019] on thousands of rover image-mask pairs and use its inference to exclude those image regions from the SfM process. The training set comes from several Mars 2020 instruments on a variety of terrain types throughout the first 2,000 sols of the mission. We mask rover shadows on the terrain at the same time as rover hardware so that imagery from different times of day will more easily align. Figure 1 shows several image-mask pairs withheld during training. The weights are hosted on Hugging Face (https://huggingface.co/ctate7163/mppp-mask), and the training code is in `mppp.mask.train`.
-
-Georegisterd rover locations are necessary for scale and relative placement. The initial camera positions come from the JPL-supplied waypoints for each rover location [@M2020:waypoints]. These are in meters, with XYZ coordinates aligned with east, north and up, respectively, and recentered for each block. The per-image camera rotations and intrinsic parameters come from the PDS metadata, converted to COLMAP camera models (THIN_PRISM_FISHEYE for the Navcam, OPENCV for Mastcam-Z). Each stereo pair is a rig so that the two cameras share one relative translation and rotation for every pair of that instrument in the block. Besides loading cameras from the PDS metadata, `mppp.cameras` also supports versioned  camera models that have less alignment error. These are instantiated per image from the temperature, focus, and sol number as the default starting parameters for each run. 
-
-MPPP uses COLMAP's SIFT [@Lowe:2004] feature matching through pycolmap and its own bundle adjustment on pyceres [@Agarwal:2023], where the waypoint priors and the resolution-aware weights enter. A few matching and triangulation parameters are set to optomize performance on sparse rover image sets.
-
-# Development roadmap
-
-Future work could develop the following features.
-
-1. Camera support for the body-mounted Hazcams, the arm-mounted WATSON camera [@Bhartia:2021] and Mastcam-Z's other zoom positions.
-2. Automatic download of the data through the PDS API instead of requiring local PDS products.
-3. Extension from SfM to automatic multi-view stereo [@Schoenberger:2016b], a 3D triangle mesh and a blended texture image.
-4. Feature matchers that outperform SIFT on variable illumination and large convergence angles.
-5. Conversion of SfM results for Nerfstudio [@Tancik:2023], to train neural radiance fields, 3D Gaussian splats [@Kerbl:2023] and other emerging 3D representations.
-6. Add support for MSL Curiosity and other rovers, helicopers, etc. 
-
-
+ 
+Several tools turn rover images into range maps, meshes or 3D models: VICAR [@VICAR], PRoViP [@Barnes:2018] and the
+Ames Stereo Pipeline [@Beyer:2018]. Their published rover workflows start from fixed-baseline stereo pairs taken at
+one rover position and use the camera models and poses delivered with the images. PRoViP merges products from several
+rover positions, and the Ames Stereo Pipeline documents bundle adjustment and an SfM tool for rover images. To our knowledge, none of them has
+a published pipeline that aligns the images of many rover stops in one bundle adjustment and refines the camera and
+stereo-rig models in it, and none makes 360° stereo or viewer-ready assets.
+ 
+JPL's Landform [@Vona:2025] is the terrain tool of Mars 2020 operations and is open source. It fuses the mission's
+stereo range products from many rover stops into tiled terrain, with the camera models of the image labels and the
+poses of the mission's localization. It aligns the terrain of different site drives to each other and to the orbital
+elevation model as rigid bodies; it does not adjust the poses of the images within a site drive, and it does not refine
+camera or rig models. Its surface is a Poisson reconstruction of a thinned point cloud, which is smooth by
+construction. Several of its workflows need the mission's data systems, and its products are not in the PDS.
+ 
+The nearest relative of RPP is the Metashape workflow of @Schmauss:2025 for Curiosity images. RPP is its Mars 2020
+counterpart, but the masking, the camera models and the prior-weighted bundle adjustment are done in code, and the
+reconstruction continues to finished 3D assets.
+ 
+Panoramic and image-based 3D photography is a mature field [@Hedman:2017; @Hedman:2018]. RPP does not contribute a new
+rendering method. It contributes the rover-specific steps that let standard methods work on archive data. RPP builds
+on COLMAP [@Schoenberger:2016] rather than writing a new SfM engine, so that its projects open in COLMAP and in other
+tools.
+ 
+SfM needs many overlapping images, and rover image sets are sparse. However, Perseverance often parks within 10 m of
+earlier or later stops. We call such a group of stops a block. RPP's site table defines several dozen blocks in the first
+2,000 sols. In a block,
+images from different stops triangulate the terrain over much wider baselines than one stereo pair (Figure 3).
+ 
+# Software design
+ 
+RPP has three stages (Figure 1). Each stage writes its products to disk with a JSON record of what they were made
+from. A run can stop and resume at any stage. When the inputs or the settings of a product change, it and the
+products built on it are made again.
+ 
+**1. Preprocessing.** RPP reads radiance-calibrated PDS products with the Planetary Data Reader [@Brown:2024]. It
+converts their colors to one convention for the Navcam, Hazcam and Mastcam-Z cameras, and it scales their brightness
+for the Sun's height, the Sun's distance and the seasonal atmospheric opacity. A ConvNeXt
+convolutional neural network [@Liu:2022; @Wightman:2019; @Paszke:2019], fine-tuned on thousands of rover image-mask
+pairs from several cameras, masks the rover hardware and its shadows in every frame (Figure 2). Without the mask, a
+feature matcher ties images together on the static rover deck instead of on the terrain. The weights are on Hugging
+Face (<https://huggingface.co/ctate7163/rpp-mask>). Each image gets its camera model from RPP's versioned models,
+evaluated at that image's temperature, focus, zoom and sol. These models replace the CAHV-family models of the PDS
+labels. They are COLMAP cameras: a thin-prism fisheye model for the Navcam and Hazcams, and models that follow the
+OpenCV standard for Mastcam-Z. They could be converted to the CAHVOR convention; RPP does not do so, because the
+solved models fit the images better than the label models; that comparison is the subject of a separate calibration
+paper. The initial position of
+every stop comes from the mission's localized waypoints [@M2020:waypoints], in meters, east-north-up. The initial
+attitude comes from the rover navigation frame in the image labels, which can drift in azimuth; the alignment corrects
+it.
+ 
+**2. SfM and MVS.** Features are matched with COLMAP through pycolmap. RPP's own bundle adjustment, on pyceres
+[@Agarwal:2023], adds waypoint position priors, weak attitude priors, resolution-aware weights, and stereo rigs: the
+two eyes of a stereo camera share one relative pose within an epoch of sols. A health report flags blocks whose
+residuals, rig changes or camera shifts are out of the expected range. Dense stereo and fusion use COLMAP. The aligned
+block is exported as a COLMAP project, point clouds and meshes (Figure 3).
+ 
+**3. Image-based rendering.** For each end-of-drive station, RPP renders depth and normal maps, a terrain mesh and
+the station assets from the block's geometry. The main trade-off in this stage is fidelity against completeness.
+Where the images do not see the terrain, under the rover or behind rocks, RPP fills it by interpolation and records
+where it did so in a provenance map. Users who need measured surfaces only can use the block's point clouds and the
+provenance maps.
+ 
+# Station assets
+ 
+Two kinds of 3D asset are produced for each station (Figure 4):
+ 
+1. **An omnidirectional stereo (ODS) panorama** [@Peleg:2001], left eye above right eye in one image, with the
+   metadata that common 360° viewers and headsets use to show it in stereo.
+2. **A full 3D station model:** one continuous mesh from under the rover out to the horizon, a separate textured
+   rover model, and sky spheres beyond the terrain. It allows head motion and walking around near the mast, which a
+   panorama cannot.
+Four design choices follow from the users named above:
+ 
+- The projection center is on the mast's axis of rotation, so the views match what the mast cameras saw.
+- The rover is rendered separately, both as projected images and as a 3D model. A user can show or hide it.
+- The terrain extends to the horizon, so the asset needs no backdrop from outside the data.
+- The full 3D model uses one texture in a radial projection centered below the mast (Figure 4C). Texture resolution
+  falls with distance, as the angular size of the terrain does. The model is small enough for a standalone headset.
+# Research impact statement
+ 
+- A demonstration set of station assets is hosted in the Rover Photogrammetry Viewer (RPV,
+  <https://ctate7163.github.io/rpv/>), which shows them in a browser and in VR headsets. The original files of that
+  set are available to developers on Hugging Face (<https://huggingface.co/datasets/ctate7163/rpp-rpv>). RPV is one
+  application built on RPP's outputs, and the same files load in Blender, game engines and other 360° viewers.
+- The Mastcam-Z landscape models of Jezero crater on Sketchfab [@Tate:Sketchfab] were made with an early version of
+  the pipeline, then named MPPP, and aligned in Agisoft Metashape [@Agisoft:2024]. The current pipeline aligns in
+  COLMAP.
+- RPP's camera, stereo-rig and mast models are the basis of a Mastcam-Z and Navcam geometric calibration paper, in
+  preparation.
+- RPP 1.0 is archived on Zenodo [@Tate:RPP:zenodo] and is packaged for pip as `rover-photogrammetry`. Tests run in
+  continuous integration, and a worked example notebook processes the Van Zyl Overlook block from public PDS products.
+# AI usage disclosure
+ 
+Claude Code (Anthropic) was used throughout the development of RPP: writing and refactoring code, writing tests,
+writing the figure scripts, and drafting documentation and parts of this paper. The author designed the pipeline,
+made the scientific and design decisions, and directed and reviewed the generated code and text. Correctness was
+checked by the test suite and by running the pipeline on real data and inspecting the results: alignment residuals
+and health reports for each block, consistency of the camera models across independent blocks and against the rover's
+deck fiducials, and visual checks of the station assets in a browser and a headset.
+ 
 # Figures
-
-![Rover hardware and shadow masks predicted by the fine-tuned ConvNeXt-tiny model on frames withheld from training.](figure1.png)
-
-![A Navcam frame as recorded through the fisheye lens (left) and resampled through its refined camera model (right).](figure2.png)
-
-<!-- ![An aligned block in plan view: stations from telemetry and after adjustment, with the sparse point cloud.](figure3.png) -->
-
-# Acknowledgments
-
-We acknowledge contributions from the Mastcam-Z team at Arizona State University. The developent and testing of MPPP used Claude Code. 
-
+ 
+![The RPP pipeline. Inputs from outside RPP (gray) and models solved with RPP (tan) enter the preprocessing stage.
+Each of the three stages (blue) writes open-format outputs (green), which 3D software, RPV, and other applications
+can read.\label{fig:pipeline}](figure1.png)
+ 
+![A Navcam stereo pair from sol 52 at Van Zyl Overlook (NLF/NRF_0052_0671568531, NCAM02052). A and B: the
+processed images, with the area masked by the network grayed out. C and D: the same images undistorted to a 95°
+pinhole camera, with the masked area removed.\label{fig:masks}](figure2.png)
+ 
+![The aligned block at Van Zyl Overlook, centered on the sol 52 station. A: the dense point cloud from above, with
+the camera centers. B: shaded relief of the same ground. C: an oblique view looking north, with rover models at the
+end-of-drive stops. D: the terrain mesh from the same viewpoint. Panels C and D show the terrain to 50 m from the
+center.\label{fig:block}](figure3.png)
+ 
+![The 3D assets for the sol 52 station at Van Zyl Overlook. A: the omnidirectional stereo 360° panorama in
+cylindrical projection, left eye, terrain only. B: the same with the rover. C: the full 3D model's texture, in a
+radial projection centered below the mast. D: the full 3D model rendered from a head position near the
+mast.\label{fig:assets}](figure4.png)
+ 
+# Acknowledgements
+ 
+We acknowledge contributions from the Mastcam-Z team at Arizona State University. [TODO: funding statement, as JOSS
+requires.]
+ 
 # References

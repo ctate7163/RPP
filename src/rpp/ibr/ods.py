@@ -1370,6 +1370,7 @@ def render_eye(scene: Scene, sources: Sequence[SourceImage], pivot: Sequence[flo
                          inpaint_px=int(round(5 * kw)))
     if checked:
         _brown((source == -1) & rover_px, gray=True)         # the rest of the model nobody colored
+    islands = fill_islands(rgb, source, label, sources) if ISLANDS else {}     # 1.0.6
     gfill = fill_ground(rgb, source, ground) if ground_fill else np.zeros(label.shape, bool)
     sky = fill_sky(rgb, source, label) if sky_fill else np.zeros(label.shape, bool)
     evened = even_sky(rgb, label) if sky_fill else {}
@@ -1379,8 +1380,57 @@ def render_eye(scene: Scene, sources: Sequence[SourceImage], pivot: Sequence[flo
     if checked:                                              # and any surface still without a source
         _brown((source == -1) & ((label == LABEL_MESH) | (label == LABEL_PLANE)))
     return {"brown_filled": brown, "rover": rover_px, "rgb": rgb, "source": source, "label": label, "range": rng, "hidden_fallback": hidden, "filled": filled,
-            "sky_filled": sky, "sky_evened": evened, "sky_healed": healed, "sky_pole": pole, "skyline": skyline, "ground_filled": gfill, "surface_check_rejected": rej, "provenance": prov,
+            "sky_filled": sky, "sky_evened": evened, "sky_healed": healed, "sky_pole": pole, "skyline": skyline, "ground_filled": gfill,
+            "islands": islands, "surface_check_rejected": rej, "provenance": prov,
             "sky_weight": evened.pop("weight", None), "effective_frames": _effective_frames(neff_vals)}
+
+
+# 1.0.6 (Christian, 22 Nov 2026: "the white disc at Van Zyl's rock"): a spot the station's own frames do not see -
+# behind the rover's deck in the one frame that looks there - was colored by a context frame of sol 49, taken 8 m
+# away at another time of day: the spot is sunlit in it and in the rock's shadow in the station's frames, a light disc
+# in a dark ground.  An island of the panorama that only such frames color (context or fill-only), no larger than
+# ISLAND_MAX_DEG2 and ringed by the station's own frames over ISLAND_RING_SHARE of its rim, takes the colors of its
+# rim (pull-push) - a frame of another time would carry other light and shadow into it.
+ISLANDS = True
+ISLAND_MAX_DEG2 = 0.6
+ISLAND_RING_SHARE = 0.75
+
+
+def fill_islands(rgb: np.ndarray, source: np.ndarray, label: np.ndarray, sources: Sequence[Any]) -> Dict[str, int]:
+    """The small islands of context or fill-only colors in the station's own (see ISLANDS), filled from their rim in
+    place; ``source`` -6 there.  Returns {"islands", "px"}."""
+    import cv2
+    from .station_mesh import push_pull
+    H, W = source.shape
+    other = np.array([bool(getattr(s_, "context", False) or getattr(s_, "fill_only", False)) for s_ in sources] + [False])
+    k = np.where(source >= 0, source, len(sources))
+    mine = (source >= 0) & ~other[k]
+    cand = (source >= 0) & other[k] & ((label == LABEL_MESH) | (label == LABEL_PLANE))
+    if not cand.any() or not mine.any():
+        return {"islands": 0, "px": 0}
+    n, lab_, st_, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+    px_per_deg = W / 360.0
+    out = {"islands": 0, "px": 0}
+    for i in range(1, n):
+        x, y, w, h, a = (int(v) for v in st_[i])
+        el = 90.0 - (y + 0.5 * h) / H * 180.0
+        area_deg2 = a / (px_per_deg ** 2) * max(np.cos(np.radians(el)), 0.05)
+        if area_deg2 > ISLAND_MAX_DEG2:
+            continue
+        x0, y0, x1, y1 = max(0, x - 3), max(0, y - 3), min(W, x + w + 3), min(H, y + h + 3)
+        isl = lab_[y0:y1, x0:x1] == i
+        ring = cv2.dilate(isl.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool) & ~isl
+        if not ring.any() or float(mine[y0:y1, x0:x1][ring].mean()) < ISLAND_RING_SHARE:
+            continue
+        blk = rgb[y0:y1, x0:x1].astype(np.float32)
+        have = mine[y0:y1, x0:x1] & ~isl
+        push_pull(blk, have, isl)
+        top = float(np.iinfo(rgb.dtype).max) if np.issubdtype(rgb.dtype, np.integer) else np.inf
+        rgb[y0:y1, x0:x1][isl] = np.clip(blk[isl], 0, top).astype(rgb.dtype)
+        source[y0:y1, x0:x1][isl] = -6
+        out["islands"] += 1
+        out["px"] += int(isl.sum())
+    return out
 
 
 GROUND_BAND_M = 0.25             # mesh this close to the ground plane counts as terrain for the ground fill
@@ -1463,6 +1513,14 @@ SKY_PRELIM_EL_DEG = 10.0         # the first fit (to tell the terrain) takes the
 SKY_TERRAIN_DARK, SKY_TERRAIN_RED = 0.05, 0.05
 SKYLINE_SPECK_MAX_PX = 300       # a speck is at most this many pixels (on an 8k eye); a larger bright patch stays as it is
 SKY_KEEP_MAX_LOG = 0.12
+# 1.0.6 (Christian, 22 Nov 2026, Rockytop in the headset: "the top pole has artifacts in the sky"; Sol0461's panorama
+# has a dark red patch at 50-75 deg, Wildcat Ridge's a violet oval): the frames see the sky only up to about 33 deg
+# there, and the fit - a cubic in elevation with three azimuth harmonics - was evaluated to the zenith, where it is an
+# extrapolation: it ran to black-red and to white.  Above the highest fitted elevation (its SKY_HOLD_PCT percentile)
+# the fit is held at that elevation, and its azimuth terms fade out over SKY_HOLD_FADE_DEG: one color per row up there.
+SKY_HOLD = True
+SKY_HOLD_PCT = 99.0
+SKY_HOLD_FADE_DEG = 15.0
 
 
 def _sky_basis(el: np.ndarray, az: np.ndarray) -> np.ndarray:
@@ -1516,10 +1574,18 @@ def skyline_sky(rgb: np.ndarray, label: np.ndarray, source: Optional[np.ndarray]
             co_, *_ = np.linalg.lstsq(B_[ok_], Y_[ok_], rcond=None)
             res_ = np.abs(Y_ - B_ @ co_).mean(axis=1)
             ok_ = res_ < 4.0 * (float(np.median(res_[ok_])) + 1e-6)
+        if SKY_HOLD:                                             # 1.0.6: where the fit has data (see SKY_HOLD)
+            e_top[id(co_)] = float(np.percentile(elr[fr_], SKY_HOLD_PCT))
         return co_, float(np.sqrt(np.mean(((Y_ - B_ @ co_)[ok_]) ** 2)))
+    e_top: Dict[int, float] = {}
 
     def fit_row(co_, r_):                                        # the fit's log colors along row r_ (W, 3)
         e_, ce_ = float(elr[r_]), float(np.cos(elr[r_]))
+        top_ = e_top.get(id(co_))
+        if top_ is not None and e_ > top_:                       # 1.0.6: held above the data, the azimuth terms fading
+            x_ = min(1.0, (e_ - top_) / np.radians(SKY_HOLD_FADE_DEG))
+            ce_ = float(np.cos(top_)) * (1.0 - x_ * x_ * (3.0 - 2.0 * x_))
+            e_ = top_
         w_ = sum((e_ ** k_) * co_.reshape(SKY_MODEL_EL_DEGREE + 1, nb, -1)[k_] * np.r_[1.0, np.full(nb - 1, ce_)][:, None]
                  for k_ in range(SKY_MODEL_EL_DEGREE + 1))
         return A @ w_
@@ -2147,8 +2213,8 @@ def _radiance_record(frames: Sequence[Dict[str, Any]], exposure16: Optional[floa
     """0.98.0 (Christian, 14 Nov 2026: "The 16 bit images should have a universal scale to radiance"): how a value of
     the 16-bit panorama turns back into radiance.  A frame's 16-bit value is
         radiance x white balance x brightness / zenith scale x scale_rad_to_int16
-    with the block's settings (the same at every station) and the frame's own zenith scale (the sun's height and the
-    opacity, :func:`rpp.radiometry.zenith_scale`; one 360 is taken within minutes, so it hardly varies in a station).
+    with the block's settings (the same at every station) and the frame's own zenith scale (the sun's height, the
+    opacity and, since 1.0.1, the Sun's distance, :func:`rpp.radiometry.zenith_scale`; one 360 is taken within minutes, so it hardly varies in a station).
     The panorama multiplies by exposure16 and by each frame's blending gain (median 1)."""
     if not frames or exposure16 is None:
         return None
@@ -2302,6 +2368,24 @@ def auto_width(rec, names: Sequence[str], scale: float = 1.0, zcam_scale: float 
                "mastcam_z": zcam, "width": w, "panorama_mrad": round(2000.0 * np.pi / w, 4)}
 
 
+def _pano_of_folder(out: PathLike, prefix: Optional[str], k16_of, azimuth0_deg: float):
+    """1.0.5: (the left eye's panorama of ``out`` in the linear units of a render, its first azimuth) from its 16-bit
+    file - for the full 3D texture's sky when the model is made alone (no eye is rendered).  None without the file."""
+    import cv2
+    f = Path(out) / f"{prefix + '_' if prefix else ''}ods_left_16.png"
+    try:
+        if not f.is_file():
+            return None
+        im = cv2.imread(str(f), cv2.IMREAD_UNCHANGED)
+        if im is None or im.ndim != 3:
+            return None
+        k16 = float(k16_of(None))
+        return np.ascontiguousarray(im[..., ::-1]).astype(np.float32) / np.float32(k16), float(azimuth0_deg)
+    except Exception as e:                                       # noqa: BLE001 - the texture's own sky, smoothed
+        log.warning("ods: the panorama %s could not serve the full 3D sky (%s)", f.name, e)
+        return None
+
+
 def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width: Union[int, str] = DEFAULT_WIDTH, ipd_m: float = DEFAULT_IPD_M,
                    families: str = "N", scale: float = 1.0, zcam_scale: float = 1.0, images: Optional[Sequence[str]] = None,
                    rows_per_chunk: int = 128, eyes: Sequence[str] = ("left", "right"), use_masks: bool = True,
@@ -2313,7 +2397,8 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
                    fill_families: str = "", nadir_mark: bool = True, site_name: Optional[str] = None,
                    nadir_mark_deg: Optional[float] = None, far_field: Optional[bool] = None,
                    context_images: Sequence[str] = (), geometry: bool = True, workers: Optional[int] = None,
-                   station_mesh: Union[bool, str] = False, rover_zcam: bool = False) -> Dict[str, Any]:
+                   station_mesh: Union[bool, str] = False, rover_zcam: bool = False,
+                   rover_part_from: Optional[PathLike] = None) -> Dict[str, Any]:
     """0.99.46: ``rover_zcam`` - the Mastcam-Z frames color the rover too (a run with a dedicated Mastcam-Z deck pan in
     stereo, e.g. Three Forks North's ZCAM05086); else the rover is colored by the Navcam frames alone, in the panorama
     and in the 3D rover (Christian, 19 Nov 2026: "the rover texture should come from the ncam images unless and there
@@ -2363,6 +2448,9 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
         want = [n for n in (list(images) if images else [n for n in station.images if n[:1].upper() in set(families.upper())])
                 if n in by and n not in set(ctx_names)]
         lin_rep = ensure_linear16(project, want + fill_names, pds=pds)
+        from .linear16 import reset_stale_levels                # 1.0.1: levels measured under other radiometry go
+        if reset_stale_levels(tone_levels_file, lin_rep.get("radiometry_key")):
+            log.info("ods: %s held levels of other radiometric settings - found again", tone_levels_file)
         lost = [n for n in fill_names if n in lin_rep["missing"]]
         if lost:                                     # a fill frame without a 16-bit image is left out, not the 16 bits
             log.warning("ods --bits 16: %d fill-only frame(s) left out (no 16-bit image): %s", len(lost), ", ".join(lost))
@@ -2643,9 +2731,15 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
             scape_done = False
             if use_masks and _sm.SCAPE:                  # 0.99.51 (Christian, 20 Nov 2026: "The ..._station_mesh_terrain
                 try:                                     # should use the same texture as the ..._station_scape_terrain just
+                    try:                                 # 1.0.2: the sky of the full 3D texture is the panorama's (the
+                        sky_pano = (res["rgb"], float(azimuth0_deg))     # eye rendered last: the sky is far, either serves)
+                    except Exception:                    # noqa: BLE001 - no eye in reach: the texture's own, smoothed
+                        sky_pano = None
+                    if sky_pano is None and station_mesh == "only":      # 1.0.5: the model alone - the panorama of the
+                        sky_pano = _pano_of_folder(out, prefix, k16_of, azimuth0_deg)      # run before, from its file
                     part = _sm.terrain_part(scene, sources, station, pool, size=_sm.TEXTURE_PX,    # with a smaller mesh"):
                                             target=_sm.TARGET_TRIANGLES, linear=linear,            # the full 3D part
-                                            rows_per_chunk=rows_per_chunk, full=True)              # first; the local 3D
+                                            rows_per_chunk=rows_per_chunk, full=True, sky_pano=sky_pano)   # first; the local 3D
                     rec_out["station_scape"] = _sm.write_part(out, pf, "scape", part, station, to8, to16)   # terrain is its
                     local = dict(part, shell=None, record=dict(part["record"], texture_of="station_scape_terrain",  # mesh
                                                                shell=None))                                       # without
@@ -2661,6 +2755,12 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
                 elif use_masks:
                     part, kind = _sm.terrain_part(scene, sources, station, pool, size=_sm.TEXTURE_PX, target=_sm.TARGET_TRIANGLES, linear=linear,
                                                      rows_per_chunk=rows_per_chunk), "terrain"
+                elif rover_part_from and _sm.copy_part(rover_part_from, out, pf, "rover") is not None:
+                    # 1.0.6: the Navcam run's rover for a Mastcam-Z version (Christian, 22 Nov 2026: "The z34 full 3d
+                    # should use the ncam rover texture")
+                    rec_out["station_mesh"] = json.loads((Path(out) / f"{pf + '_' if pf else ''}{_sm.PART['rover']}.json").read_text(encoding="utf-8"))
+                    scape_done = True
+                    log.info("ods: the rover part copied from %s", rover_part_from)
                 else:
                     part, kind = _sm.rover_part(scene, sources, station, pool, size=_sm.ROVER_TEXTURE_PX, linear=linear,
                                                    rows_per_chunk=rows_per_chunk), "rover"
@@ -2687,6 +2787,12 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
                 rec_out["render_processes"] = 1
             pool.close()
     if station_mesh == "only":
+        if use_masks and linear and rec_out.get("station_scape") and not rec_out["station_scape"].get("failed"):
+            try:                                         # 1.0.5: the new texture's color skins (the cells moved)
+                from .station_mesh import write_skins
+                write_skins(out, tone_levels_file)
+            except Exception as e:                       # noqa: BLE001
+                log.warning("ods: no color skins of the full 3D texture (%s)", e)
         return rec_out.get("station_mesh") or {}
     if center_depth and depth_rec is None:               # 0.97.11: the depth without the center panorama's colors
         td = time.time()                                 # (Christian, 13 Nov 2026: "skip the center render because it
@@ -2769,6 +2875,7 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
         fr = [v for v in (lin_rep.get("frames") or {}).values() if v]
         rec_out["linear16"] = {
             "rendered": linear, "missing": lin_rep["missing"], "dir": lin_rep["dir"],
+            "radiometry_key": lin_rep.get("radiometry_key"),              # 1.0.1: the settings of the frames' values
             "left_out_without_16bit": lin_rep.get("left_out", []),        # 0.99.41: station frames left out
             "encoding": "uint16 linear, no gamma: value = radiance x white balance x brightness / zenith scale x "
                         "scale_rad_to_int16 x the frame's gain (gains in this file); value / 64 = the 8-bit panorama "
@@ -2804,9 +2911,30 @@ def render_station(project, rec, station, scene: Scene, out_dir: PathLike, width
         from .xmp import tag_folder
         from .xmp import author_fields, tag_products
         rec_out.update(author_fields())                                     # 0.99.53: the author and the RPP version
+        # 1.0.1 (Christian, 21 Nov 2026: "Every PNG saved should have metadata with the provenances and scaling factors
+        # plus whatever info is useful downstream"): the station, its Mars position, the frame, the block and its
+        # model, the radiometric key and the levels of the 8-bit views, in every picture of the folder
+        tags = {"Station": str(getattr(station, "label", "") or prefix)}
+        try:
+            from ..sfm.dense import model_stamp
+            from .linear16 import block_manifest, station_position
+            tags.update({k: v for k, v in station_position(block_manifest(project), list(station.images)).items() if v is not None})
+            tags.update({"Frame": "station frame: east, north, up (m) about the pivot on the mast axis; "
+                                  "column 0 of a panorama at AzimuthOfColumn0Deg east of north",
+                         "AzimuthOfColumn0Deg": rec_out.get("azimuth_of_column_0_deg"),
+                         "Block": Path(project.root).parent.name,
+                         "BlockModel": model_stamp(Path(project.root) / "gui_native" / "sparse"),
+                         "RadiometryKey": (rec_out.get("linear16") or {}).get("radiometry_key"),
+                         "Exposure16": (rec_out.get("linear16") or {}).get("exposure16"),
+                         "ViewLevels8bitUnits": json.dumps((rec_out.get("linear16") or {}).get("view_levels_8bit_units")),
+                         "SourceFrames": len(list(station.images)), "Record": "ods.json (every setting and source frame)"})
+            tags = {k: v for k, v in tags.items() if v is not None}
+            rec_out["position"] = {k: tags[k] for k in tags if k.startswith(("Latitude", "Longitude", "Elevation", "Datum"))}
+        except Exception as e:                                               # noqa: BLE001 - the station's name still goes in
+            log.warning("ods: the products' metadata without the position (%s: %s)", type(e).__name__, e)
         rec_out["xmp"] = tag_folder(out, heading_center_deg=float(rec_out.get("azimuth_of_column_0_deg") or 0.0) + 180.0,
-                                    extra={"Station": str(getattr(station, "label", "") or prefix)})
-        rec_out["xmp_author"] = len(tag_products(out, {"Station": str(getattr(station, "label", "") or prefix)}))
+                                    extra=tags)
+        rec_out["xmp_author"] = len(tag_products(out, tags))
     except Exception as e:                                                  # noqa: BLE001 - the products are complete without it
         log.warning("ods: XMP not written (%s: %s)", type(e).__name__, e)
     (out / "ods.json").write_text(json.dumps(rec_out, indent=1, default=float), encoding="utf-8")
