@@ -149,3 +149,40 @@ def test_a_block_under_a_run_is_left_alone(tmp_path):
     assert block_busy(tmp_path) == os.getpid()
     (tmp_path / STATUS_FILE).write_text(json.dumps(dict(st, state="done")))
     assert block_busy(tmp_path) is None
+
+
+def test_one_sheet_the_lower_of_two_overlapping_pieces_goes_and_small_holes_close():
+    """1.0.4: tidy_sheets drops the triangles of a piece wholly under another piece (the zones' overlap), drops small
+    pieces, closes a small hole with a fan, and keeps the fill's underlay and a sheet's own steep faces."""
+    import numpy as np
+    from rpp.ibr import mesh as M
+
+    def grid(x0, x1, y0, y1, z, step=0.05, hole=None):
+        xs, ys = np.arange(x0, x1 + 1e-9, step), np.arange(y0, y1 + 1e-9, step)
+        X, Y = np.meshgrid(xs, ys)
+        V = np.stack([X.ravel(), Y.ravel(), np.full(X.size, z)], 1)
+        nx, ny = len(xs), len(ys)
+        i, j = np.meshgrid(np.arange(nx - 1), np.arange(ny - 1))
+        a = (j * nx + i).ravel()
+        F = np.concatenate([np.stack([a, a + 1, a + nx + 1], 1), np.stack([a, a + nx + 1, a + nx], 1)])
+        if hole is not None:
+            c = V[F].mean(1)
+            F = F[np.hypot(c[:, 0] - hole[0], c[:, 1] - hole[1]) > hole[2]]
+        return V, F
+    Va, Fa = grid(2.0, 4.0, -1.0, 1.0, 0.0, hole=(2.5, 0.0, 0.06))      # the inner sheet, with a small hole
+    Vb, Fb = grid(3.5, 6.0, -1.0, 1.0, -0.01)                           # the outer sheet, 1 cm lower, 0.5 m of overlap
+    Vc, Fc = grid(8.0, 8.1, 0.0, 0.1, 0.0)                              # a small piece on its own
+    Vf, Ff = grid(2.0, 6.0, -1.0, 1.0, -0.2, step=0.25)                 # the fill's underlay
+    V = np.vstack([Va, Vb, Vc, Vf])
+    F = np.vstack([Fa, Fb + len(Va), Fc + len(Va) + len(Vb), Ff + len(Va) + len(Vb) + len(Vc)])
+    nm = len(Fa) + len(Fb) + len(Fc)
+    V2, F2, nm2, rep = M.tidy_sheets(V, F, nm, (0.0, 0.0, 1.9), (0, 0, 1))
+    assert rep["lower_sheet"]["measured"] > 300 and rep["lower_sheet"]["fill"] == 0
+    assert len(F2) - nm2 == len(Ff)                                     # the underlay stays
+    c = V2[F2[:nm2]].mean(1)
+    low = np.abs(c[:, 2] + 0.01) < 1e-6
+    assert not (low & (c[:, 0] > 3.6) & (c[:, 0] < 3.9)).any()          # the outer sheet's part under the inner one
+    assert (low & (c[:, 0] > 4.1)).sum() == (np.abs(V[Fb + len(Va)].mean(1)[:, 0] - 5.05) < 0.95).sum()   # the rest whole
+    assert rep["fragments"]["pieces"] == 1 and not (c[:, 0] > 7.5).any()
+    assert rep["holes_closed"]["loops"] == 1
+    assert (np.hypot(c[:, 0] - 2.5, c[:, 1]) < 0.05).any()             # the fan in the hole

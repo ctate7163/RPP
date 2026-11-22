@@ -1333,6 +1333,193 @@ def fill_terrain(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], up: Seque
     return V, F, rep
 
 
+# ------------------------------------------------------------------------------------------- 1.0.4: one sheet
+TIDY = True
+TIDY_UNDER_M = 0.35              # a triangle with another part of the mesh this near straight above it is the lower sheet
+TIDY_UNDER_MIN_M = 0.001         # ... the ray starts this far above the triangle
+TIDY_SAME_PIECE_MIN_M = 0.02     # within one piece (a pocket behind a rock) the sheet above is at least this far
+TIDY_SAME_PIECE = False          # 1.0.4, measured on Van Zyl: dropping the lower sheet within one piece takes the
+#                                  ground under a rock's overhang and opens the fill beneath - left off
+TIDY_WHOLLY = True               # a lower triangle goes only when its three corners are covered too
+TIDY_LEVEL = 0.3                 # only triangles this level (|normal . up|) are a lower sheet: a steep face, whose own
+#                                  bumps stand over it, stays
+TIDY_SLIVER_TO_M = 10.0          # slivers are looked for within this of the mast axis
+TIDY_SLIVER_GRAZE = 0.15         # a sliver: seen this edge-on from the pivot (|normal . view ray|) ...
+TIDY_SLIVER_EDGE = 3.0           # ... with an edge this many times the median edge at its range
+TIDY_SLIVER_ASPECT = 12.0        # or this long for its height, at twice the grazing limit
+TIDY_DROP_FILL = False           # the fill's underlay stays (see tidy_sheets)
+TIDY_FRAGMENT_TRIANGLES = 60     # a piece of fewer triangles (after the steps above) is a flap: dropped
+TIDY_LOOP_EDGES = 80             # a hole with at most this many edges ...
+TIDY_LOOP_DIAMETER_M = 0.30      # ... and this wide (x (1 + range / 10 m)) is closed with a flat fan
+
+
+def _pieces(F: np.ndarray, n_vertices: int) -> np.ndarray:
+    """A label per triangle of the piece it belongs to (triangles sharing a vertex), by scipy - fast on millions."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components as cc
+    F = np.asarray(F, np.int64)
+    i = np.concatenate([F[:, 0], F[:, 1]])
+    j = np.concatenate([F[:, 1], F[:, 2]])
+    _, lab = cc(coo_matrix((np.ones(len(i), np.int8), (i, j)), shape=(n_vertices, n_vertices)), directed=False)
+    _, out = np.unique(lab[F[:, 0]], return_inverse=True)
+    return out.ravel()
+
+
+def _boundary_edges(F: np.ndarray) -> np.ndarray:
+    """The directed edges (k, 2) that belong to one triangle only."""
+    E = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    Es = np.sort(E, axis=1)
+    key = Es[:, 0].astype(np.int64) * (1 << 32) + Es[:, 1]
+    _, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
+    return E[cnt[inv.ravel()] == 1]
+
+
+def close_small_loops(V: np.ndarray, F: np.ndarray, pivot: Sequence[float], max_edges: int = TIDY_LOOP_EDGES,
+                      max_diameter_m: float = TIDY_LOOP_DIAMETER_M) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Holes of the surface ``F`` that are simple loops of at most ``max_edges`` edges and ``max_diameter_m`` across
+    (x (1 + range / 10 m)) get a fan about their centroid: (V with the centroids added, the new triangles, loops)."""
+    B = _boundary_edges(np.asarray(F, np.int64))
+    if not len(B):
+        return V, np.zeros((0, 3), np.int64), 0
+    out_deg = np.bincount(B[:, 0], minlength=len(V))
+    in_deg = np.bincount(B[:, 1], minlength=len(V))
+    nxt = np.full(len(V), -1, np.int64)
+    nxt[B[:, 0]] = B[:, 1]
+    simple = (out_deg <= 1) & (in_deg <= 1)
+    seen = np.zeros(len(V), bool)
+    P = np.asarray(pivot, float)
+    newV, newF, n = [], [], 0
+    for s in B[:, 0]:
+        if seen[s]:
+            continue
+        loop, v, ok = [], int(s), True
+        while not seen[v]:
+            seen[v] = True
+            loop.append(v)
+            if not simple[v] or nxt[v] < 0:
+                ok = False
+            v = int(nxt[v]) if nxt[v] >= 0 else int(s)
+            if len(loop) > 100000:
+                ok = False
+                break
+        if not ok or v != s or not (3 <= len(loop) <= max_edges):
+            continue
+        X = V[loop]
+        c = X.mean(0)
+        if np.ptp(X, axis=0).max() > max_diameter_m * (1.0 + np.hypot(c[0] - P[0], c[1] - P[1]) / 10.0):
+            continue
+        ci = len(V) + len(newV)
+        newV.append(c)
+        a = np.asarray(loop, np.int64)
+        b = np.roll(a, -1)
+        newF.append(np.stack([b, a, np.full(len(a), ci)], 1))        # the boundary edge a -> b turned: the hole's side
+        n += 1
+    if not n:
+        return V, np.zeros((0, 3), np.int64), 0
+    return np.vstack([V, np.asarray(newV)]), np.concatenate(newF), n
+
+
+def tidy_sheets(V: np.ndarray, F: np.ndarray, n_measured: int, pivot: Sequence[float], up: Sequence[float]
+                ) -> Tuple[np.ndarray, np.ndarray, int, Dict[str, Any]]:
+    """1.0.4 (Christian, 21 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; flaps and slits at rock edges):
+    the terrain as one sheet.  Of ``F`` = the measured triangles [0, ``n_measured``) then the fill:
+
+    1. slivers within ``TIDY_SLIVER_TO_M``: long triangles seen edge-on from the pivot (the surface drawn across a
+       depth edge) are dropped;
+    2. the lower sheet: a measured triangle with another part of the mesh within ``TIDY_UNDER_M`` straight above its
+       centroid is dropped (the zones' overlap, a pocket behind a rock), and a fill triangle wholly under the measured
+       surface (its corners and centroid) too - the fill's rim under the measured edge stays;
+    3. pieces of fewer than ``TIDY_FRAGMENT_TRIANGLES`` triangles are dropped;
+    4. small holes of the measured surface are closed with a flat fan.
+
+    Returns (V, F, the new number of measured triangles, report).  A real overhang's underside goes with 2."""
+    o3d = _o3d()
+    F = np.asarray(F, np.int64)
+    P = np.asarray(pivot, float)
+    u = np.asarray(up, float) / np.linalg.norm(up)
+    nm = int(n_measured)
+    rep: Dict[str, Any] = {"triangles_in": int(len(F)), "measured_in": nm}
+    is_fill = np.arange(len(F)) >= nm
+    keep = np.ones(len(F), bool)
+    cen, nrm, longest = triangle_geometry(V, F)
+    rh = horizontal_distance(cen, P, u)
+    # 1 slivers
+    v = cen - P
+    v /= np.maximum(np.linalg.norm(v, axis=1), 1e-9)[:, None]
+    graze = np.abs((nrm * v).sum(1))
+    T = V[F]
+    e = np.stack([np.linalg.norm(T[:, 1] - T[:, 0], axis=1), np.linalg.norm(T[:, 2] - T[:, 1], axis=1),
+                  np.linalg.norm(T[:, 0] - T[:, 2], axis=1)], 1)
+    area = 0.5 * np.linalg.norm(np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), axis=1)
+    aspect = longest ** 2 / np.maximum(2.0 * area, 1e-12)
+    near = (rh < TIDY_SLIVER_TO_M) & ~is_fill
+    med = np.ones(len(F))
+    if near.any():
+        bins = np.minimum((rh[near] / 0.5).astype(int), int(TIDY_SLIVER_TO_M / 0.5))
+        mb = np.array([np.median(longest[near][bins == b]) if (bins == b).any() else np.inf for b in range(bins.max() + 1)])
+        med[near] = mb[bins]
+    sliver = near & (((graze < TIDY_SLIVER_GRAZE) & (longest > TIDY_SLIVER_EDGE * med))
+                     | ((graze < 2 * TIDY_SLIVER_GRAZE) & (aspect > TIDY_SLIVER_ASPECT) & (longest > 1.5 * med)))
+    keep &= ~sliver
+    rep["slivers"] = int(sliver.sum())
+    # 2 the lower sheet (cast on the mesh without the slivers)
+    def above(Fk, pts):
+        sc = o3d.t.geometry.RaycastingScene()
+        sc.add_triangles(o3d.core.Tensor(np.asarray(V, np.float32)), o3d.core.Tensor(np.asarray(Fk, np.uint32)))
+        rays = np.concatenate([pts + TIDY_UNDER_MIN_M * u, np.broadcast_to(u, pts.shape)], 1).astype(np.float32)
+        ans = sc.cast_rays(o3d.core.Tensor(rays))
+        return ans["t_hit"].numpy() + TIDY_UNDER_MIN_M, ans["primitive_ids"].numpy().astype(np.int64)
+    idx = np.flatnonzero(keep)
+    t, hit = above(F[idx], cen[idx])
+    under = t < TIDY_UNDER_M
+    hit_fill = np.zeros(len(idx), bool)
+    hit_fill[under] = is_fill[idx[hit[under]]]
+    level = np.abs(nrm @ u) > TIDY_LEVEL
+    piece = np.full(len(F), -1, np.int64)
+    piece[idx] = _pieces(F[idx], len(V))
+    other = np.zeros(len(idx), bool)
+    other[under] = piece[idx[hit[under]]] != piece[idx[under]]
+    hit_level = np.zeros(len(idx), bool)
+    hit_level[under] = level[idx[hit[under]]]
+    low_meas = (under & ~is_fill[idx] & ~hit_fill & level[idx] & hit_level     # measured under measured: the lower goes
+                & (other | (TIDY_SAME_PIECE & (t > TIDY_SAME_PIECE_MIN_M))))
+    if TIDY_WHOLLY and low_meas.any():                         # ... when all of it is covered: no crack opens at the
+        li = idx[low_meas]                                     # line where two sheets cross
+        mall = idx[~is_fill[idx]]
+        ok = np.ones(len(li), bool)
+        for k in range(3):
+            tt, hh = above(F[mall], T[li, k])
+            ok &= (tt < TIDY_UNDER_M) & (piece[mall[np.where(tt < TIDY_UNDER_M, hh, 0)]] != piece[li])
+        low_meas[np.flatnonzero(low_meas)[~ok]] = False
+    mi = np.flatnonzero(keep & ~is_fill)
+    fi = np.flatnonzero(keep & is_fill)
+    low_fill = np.zeros(len(fi), bool)
+    if TIDY_DROP_FILL and len(fi) and len(mi):
+        ok = np.ones(len(fi), bool)
+        for pts in (cen[fi], T[fi, 0], T[fi, 1], T[fi, 2]):
+            tt, _ = above(F[mi], pts)
+            ok &= tt < TIDY_UNDER_M
+        low_fill = ok
+    keep[idx[low_meas]] = False
+    keep[fi[low_fill]] = False
+    rep["lower_sheet"] = {"measured": int(low_meas.sum()), "fill": int(low_fill.sum()), "within_m": TIDY_UNDER_M}
+    # 3 fragments of the measured surface
+    mk = np.flatnonzero(keep & ~is_fill)
+    if len(mk):
+        lab = _pieces(F[mk], len(V))
+        cnt = np.bincount(lab)
+        frag = cnt[lab] < TIDY_FRAGMENT_TRIANGLES
+        keep[mk[frag]] = False
+        rep["fragments"] = {"triangles": int(frag.sum()), "pieces": int((cnt < TIDY_FRAGMENT_TRIANGLES).sum())}
+    Fm, Ff = F[keep & ~is_fill], F[keep & is_fill]
+    # 4 small holes closed
+    V2, Fc, loops = close_small_loops(V, Fm, P)
+    rep["holes_closed"] = {"loops": int(loops), "triangles": int(len(Fc))}
+    Fm = np.vstack([Fm, Fc]) if len(Fc) else Fm
+    rep.update(measured_out=int(len(Fm)), triangles_out=int(len(Fm) + len(Ff)))
+    return V2, np.vstack([Fm, Ff]) if len(Ff) else Fm, int(len(Fm)), rep
+
+
 def build_station_mesh(points: np.ndarray, pivot: Sequence[float], out_dir: PathLike, normals: Optional[np.ndarray] = None,
                        dense_dir: Optional[PathLike] = None, colmap_exe: Optional[str] = None,
                        radius_m: float = DEFAULT_RADIUS_M, far_radius_m: Optional[float] = None,
@@ -1444,6 +1631,17 @@ def build_station_mesh(points: np.ndarray, pivot: Sequence[float], out_dir: Path
                                       rover_keep_m=rover_keep_m, apron_to_m=plane_radius_m if FLAT_EXTENSION else None)
         log.info("mesh: terrain fill - %d of %d cells had no surface (%d triangles); %d triangles under the rover replaced",
                  fill_rep["filled"], fill_rep["cells"], fill_rep["triangles"], fill_rep["under_rover_triangles_removed"])
+        if TIDY and len(F):                                     # 1.0.4: the terrain as one sheet
+            try:
+                V, F, nm_, tidy = tidy_sheets(V, F, int(fill_rep.get("measured_triangles", len(F))), pivot, up)
+                fill_rep["measured_triangles"] = nm_
+                fill_rep["tidy"] = tidy
+                log.info("mesh: one sheet - %d slivers, %d + %d triangles of a lower sheet (measured, fill), %d of "
+                         "small pieces dropped; %d small holes closed", tidy["slivers"], tidy["lower_sheet"]["measured"],
+                         tidy["lower_sheet"]["fill"], (tidy.get("fragments") or {}).get("triangles", 0),
+                         tidy["holes_closed"]["loops"])
+            except Exception as e:                              # noqa: BLE001 - the mesh as it was
+                log.warning("mesh: the one-sheet step failed (%s) - the mesh is left as it was", e)
         terrain_tris = [0, int(fill_rep.get("measured_triangles", len(F)))]
         try:                                                    # 1.0.1: the mesh checks
             chk = mesh_checks(V, F, int(fill_rep.get("measured_triangles", len(F))), int(len(F)), pivot, up,

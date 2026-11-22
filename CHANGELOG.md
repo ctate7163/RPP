@@ -9,6 +9,18 @@ The development history before 1.0 is in
 [`docs/history/`](https://github.com/ctate7163/rpp/tree/main/docs/history): `CHANGELOG_v0p95-v0p99.md`,
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
+## 1.0.4 — 21 Nov 2026 (branch v1p01)
+- Station mesh, one sheet (`rpp.ibr.mesh.tidy_sheets`, after the fill; `mesh_report.json` `fill.tidy`): within 10 m
+  the long triangles seen edge-on from the pivot are dropped; a level measured triangle wholly under another piece of
+  the measured surface within 0.35 m is dropped (the zones overlap by 0.6 m at 4, 12, 20 and 30 m: two sheets 5 mm
+  apart); pieces of fewer than 60 triangles are dropped; holes of at most 80 edges and 0.3 m are closed with a fan.
+  Measured on Van Zyl (Sol0052): 618 slivers, 91,135 triangles of a lower sheet, 7,680 in 1,020 small pieces, 2,407
+  holes closed; rays from four eye places that end on the fill or on nothing: unchanged.
+- Not done as first written, because it made holes on Van Zyl: dropping the lower sheet within one piece (it takes
+  the ground under a rock's overhang; `TIDY_SAME_PIECE`), by the centroid alone (cracks where two sheets cross;
+  `TIDY_WHOLLY`), and dropping the fill's underlay (`TIDY_DROP_FILL`: rays ending on nothing below -10 degrees went
+  from 0 to 9,201).  The fill and the measured points are still meshed apart.
+
 ## 1.0.3 — 21 Nov 2026 (branch v1p01)
 - A new version number, so that every station is made again on the code of this evening (a station is "done" only
   when it was made by the running code): the sky of the full 3D texture from the panorama, sheets under the surface
