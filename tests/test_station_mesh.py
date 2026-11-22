@@ -47,7 +47,7 @@ def test_terrain_texture_is_seen_from_above_the_pivot_and_hidden_faces_get_cells
     src = O.station_sources(proj, rec, st, scale=1.0)
     tp = SM.terrain_part(sc, src, st, size=1024, target=8000)
     r = tp["record"]
-    assert r["triangles"] <= 8000 and r["center_above_pivot_m"] == 0.5 and 70 < r["theta_max_deg"] < 85
+    assert r["triangles"] <= 8000 and r["center_above_pivot_m"] == 0.0 and 70 < r["theta_max_deg"] < 88
     assert r["triangles_in_cells"] > 10 and r["hidden_from_center"] > 10 and r["disc_texels_colored"] > 0.6
     uv = tp["uv"]
     assert uv.min() >= 0 and uv.max() <= 1 and len(tp["V"]) == len(uv) and tp["F"].max() == len(uv) - 1
@@ -887,3 +887,29 @@ def test_a_block_in_another_root(tmp_path, monkeypatch):
     assert SS.block_folder(st, f3) == f3 / "mars2020_sol_0015_van_zyl_overlook_huge"
     monkeypatch.setenv("RPP_BLOCK_ROOTS", str(old))
     assert SS.block_folder(st, f3) == old / "mars2020_sol_0015_van_zyl_overlook_huge"
+
+
+def test_the_sky_keeps_its_hills_and_is_smooth_above_the_skyline():
+    """1.0.1 (Christian, 21 Nov 2026: "use the panoramas own sky instead of white. Make sure that artifacts above the sky
+    line are smoothed out"): far texels below the skyline's circle keep their colors (a bright hazy hill is not sky),
+    above it they are the far texels' smooth mean - a frame's edge is gone."""
+    from rpp.ibr import station_mesh as M
+    S, rpx = 512, 250.0
+    knee = (np.pi / 2 + np.radians(5.0), 0.9)
+    yy, xx = np.mgrid[:S, :S]
+    rho = np.hypot(xx + 0.5 - S / 2, S / 2 - (yy + 0.5))
+    r_h = float(M._rho_of_theta(np.array([np.pi / 2]), rpx, np.pi, knee)[0])          # the horizon
+    r_k = knee[1] * rpx
+    far = (rho > r_h) & (rho <= rpx)
+    rgb = np.full((S, S, 3), 100.0, np.float32)
+    rgb[far] = 200.0
+    hill = far & (rho < r_h + 0.3 * (r_k - r_h)) & (xx > S / 2)                       # a bright hill, low
+    rgb[hill] = 230.0
+    edge = far & (rho > r_k + 2) & (xx < S / 2)                                       # a frame's edge in the sky: a step
+    rgb[edge] = 160.0
+    n = M.smooth_sky(rgb, far, S, rpx, knee)
+    assert n > 0 and np.allclose(rgb[hill], 230.0) and np.allclose(rgb[~far], 100.0)
+    up = far & (rho > r_k + 4)
+    row = rgb[int(S / 2 - r_k - 8), :, 0]                                             # a row high in the sky, across the step
+    seg = row[S // 2 - 20:S // 2 + 20]
+    assert float(np.abs(np.diff(seg)).max()) < 6.0 and 160.0 < float(seg.min()) and float(seg.max()) < 200.5   # a ramp

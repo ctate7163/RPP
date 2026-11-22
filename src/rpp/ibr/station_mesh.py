@@ -56,10 +56,17 @@ log = logging.getLogger("rpp.ibr")
 
 RADIUS_M = 20.0                 # the terrain within this horizontal distance of the mast axis (0.99.39, Christian, 19 Nov
 #                                 2026: "the 3d terrain should go out to 20 m instead of 10 m"; 10 m before)
-CENTER_ABOVE_M = 0.5            # the terrain texture's projection center above the pivot
+CENTER_ABOVE_M = 0.0            # the terrain texture's projection center above the pivot.  1.0.1 (Christian, 21 Nov 2026:
+#                                 "dark strips on the terrain ... from the ods pivot being rendered from a position
+#                                 higher than the ncam views"; "use the same projection on the ods and full-3d
+#                                 texture"): the pivot itself, the panorama's center (0.5 m above it until 1.0) - from
+#                                 there the disc holds what the mast cameras saw, and no sliver of unseen ground
+#                                 behind each rock, colored from other frames, outlines it
 TARGET_TRIANGLES = 500_000      # the simplified terrain ("medium poly"; 300,000 within 10 m until 0.99.39)
 TEXTURE_PX = 8192               # the terrain texture's side
-ROVER_TEXTURE_PX = 4096         # the rover texture's side
+ROVER_TEXTURE_PX = 8192         # the rover texture's side as it is made and kept (1.0.1, Christian, 21 Nov 2026: "A 8k rover
+#                                 texture is useful, but we probably want to serve 4k in vr"; 4096 until 1.0)
+ROVER_GLB_PX = 4096             # ... and its side in the viewer's .glb files (reduced from the kept one)
 VIEW_RADIUS_M = 1.0             # the rover is textured where it can be seen from within this distance of the pivot
 VIEWPOINTS = 32                 # directions of the viewpoints on each sphere (0.5 m and VIEW_RADIUS_M)
 ROVER_FAMILIES = "N"            # the frames that color the rover ("viewed by the ncams")
@@ -86,8 +93,12 @@ GRAY_STRIP = (4, 64)            # the rover gray's cell: width, height (the shad
 # 1.0 (Christian, 20 Nov 2026: "the mesh_rover texture should also have larger texture islands if possible"): the rover's
 # triangles share charts (:func:`triangle_charts`) in place of a cell each - fewer seams and less of the texture spent
 # on gutters
-CHART_MAX_DEG = 35.0            # a chart's triangles face within this angle of its first (largest) triangle
-CHART_MAX_M = 0.6               # a chart's longest side, in its plane
+CHART_MAX_DEG = 50.0            # a chart's triangles face within this angle of its first (largest) triangle (1.0.1,
+#                                 Christian, 21 Nov 2026: "Larger patches (merge neighbors facing the same way)"; 35 deg
+#                                 and 0.6 m until 1.0: on the rover model 21,800 charts, 13 % of its area in charts of
+#                                 one triangle - with 50 deg and 1 m 14,200 and none; 70 deg gives only 13,000: the
+#                                 model is made of small parts)
+CHART_MAX_M = 1.0               # a chart's longest side, in its plane
 MAX_CHART_PX = 1024             # a chart's longest side in texels; a larger chart is given coarser texels
 WELD_M = 1e-4                   # vertices nearer than this are one (the model repeats them along its hard edges)
 CHART_OVERLAP_TOL = 0.03        # a chart whose triangles cover more than its outline by this share folds over itself
@@ -496,6 +507,9 @@ def sky_texels(rgb: np.ndarray, far: np.ndarray, have: np.ndarray, in_disc: np.n
 # is not sky (the mesh, or a far hill), median filtered over SKYLINE_MEDIAN_BINS: above it every far texel is white,
 # below it none is, and a far texel below it that was taken for sky takes the colors of the hills around it
 SKYLINE_ONE = True
+SKY_IMAGED = True                # 1.0.1: the sky as the frames show it (the panorama's own), not white - see smooth_sky
+SKY_FEATHER_DEG = 1.5            # ... sharp to smoothed over this below the skyline's circle
+SKY_SMOOTH_DEG = 3.0             # ... the Gaussian mean above it (the panoramas' enhanced views smooth their sky by 3 deg too)
 SKYLINE_BIN_DEG = 0.25
 SKYLINE_MEDIAN_BINS = 9          # 2.25 deg
 SKYLINE_LOW_EL_DEG = -5.0        # the skyline is looked for above this elevation
@@ -533,6 +547,46 @@ def one_skyline(rgb: np.ndarray, sky: np.ndarray, far: np.ndarray, have: np.ndar
     log.info("station mesh: one skyline - %d far texels above it white, %d below it from the hills",
              int((new & ~sky).sum()), int(holes.sum()))
     return new
+
+
+def smooth_sky(rgb: np.ndarray, far: np.ndarray, size: int, rpx: float, knee, feather_deg: float = SKY_FEATHER_DEG,
+               sigma_deg: float = SKY_SMOOTH_DEG) -> int:
+    """1.0.1 (Christian, 21 Nov 2026: "use the panoramas own sky instead of white. Make sure that artifacts above the sky
+    line are smoothed out"): the far texels (``far``: the sky and the hills beyond the mesh, colored by the frames or
+    filled from them) keep their colors below the skyline's circle - the hills, as in the panorama - and above it are
+    the far texels' own Gaussian mean (``sigma_deg`` at the circle's texel scale), which takes out the frames' edges
+    and blemishes; the two are mixed over ``feather_deg`` below the circle.  ``rgb`` float in place.  Returns the
+    texels changed."""
+    import cv2
+    if not knee or not far.any():
+        return 0
+    tk = float(knee[0])
+    r1 = float(knee[1]) * rpx
+    r0 = float(_rho_of_theta(np.array([tk - np.radians(feather_deg)]), rpx, np.pi, knee)[0])
+    if not r1 > r0:
+        return 0
+    k = max(1, int(round(size / 1024.0)))                      # the mean at about 1024 px: the sky has no detail to keep
+    n = size // k
+    w = cv2.resize(far.astype(np.float32), (n, n), interpolation=cv2.INTER_AREA)
+    px_per_deg = (r1 / max(np.degrees(tk), 1e-6)) / k
+    sig = float(max(sigma_deg * px_per_deg, 2.0))
+    wb = cv2.GaussianBlur(w, (0, 0), sig)
+    ys, xs = np.nonzero(far)
+    c = size / 2.0
+    rho = np.hypot(xs + 0.5 - c, c - (ys + 0.5))
+    t = np.clip((rho - r0) / (r1 - r0), 0.0, 1.0).astype(np.float32)
+    m = t > 0
+    if not m.any():
+        return 0
+    ys, xs, t = ys[m], xs[m], t[m]
+    t = t * t * (3.0 - 2.0 * t)                                 # smoothstep
+    gx, gy = np.clip(xs // k, 0, n - 1), np.clip(ys // k, 0, n - 1)
+    den = np.maximum(wb[gy, gx], 1e-6)
+    for ch in range(3):
+        a = cv2.resize(np.where(far, rgb[..., ch], 0.0).astype(np.float32), (n, n), interpolation=cv2.INTER_AREA)
+        mean = cv2.GaussianBlur(a, (0, 0), sig)[gy, gx] / den
+        rgb[ys, xs, ch] = rgb[ys, xs, ch] * (1.0 - t) + mean * t
+    return int(len(ys))
 
 
 def push_pull(rgb: np.ndarray, have: np.ndarray, region: np.ndarray) -> np.ndarray:
@@ -720,13 +774,14 @@ def layout_charts(V: np.ndarray, F: np.ndarray, normals: np.ndarray, areas: np.n
         lo.append(p.reshape(-1, 2).min(axis=0))
         ext.append(p.reshape(-1, 2).max(axis=0) - lo[-1])
     lo, ext = np.nan_to_num(np.asarray(lo)), np.nan_to_num(np.asarray(ext), nan=0.0, posinf=0.0, neginf=0.0)
-    g = GUTTER_PX
+    g = GUTTER_PX * max(1, int(size) // ROVER_GLB_PX)            # 1.0.1: GUTTER_PX texels are left in the reduced .glb texture
+    mcp = MAX_CHART_PX * max(1, int(size) // ROVER_GLB_PX)
     free = size * size - sum(r[2] * r[3] for r in reserved)
     t = float(np.sqrt(max(1.3 * float((ext[:, 0] * ext[:, 1]).sum()), 1e-12) / max(fill * free, 1.0)))
     for _ in range(80):
         s = np.full(len(charts), t)
-        big = ext.max(axis=1) / s > (MAX_CHART_PX - 2 * g)
-        s[big] = ext[big].max(axis=1) / (MAX_CHART_PX - 2 * g)
+        big = ext.max(axis=1) / s > (mcp - 2 * g)
+        s[big] = ext[big].max(axis=1) / (mcp - 2 * g)
         wh = np.ceil(ext / s[:, None]).astype(np.int64) + 1 + 2 * g
         pos = shelf_pack(wh, size, None, reserved)
         if pos is not None:
@@ -1007,7 +1062,10 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     else:
         filled = push_pull(rgb, have & in_disc, in_disc)
     sky_white = None
-    if full and SKY_WHITE and sky is not None:                   # 0.99.41: the sky white
+    sky_smoothed = 0
+    if full and SKY_IMAGED and sky is not None:                  # 1.0.1: the panorama's own sky, smoothed above the skyline
+        sky_smoothed = smooth_sky(rgb, sky & in_disc, size, rpx, knee)
+    elif full and SKY_WHITE and sky is not None:                 # 0.99.41: the sky white
         sky_white = sky_texels(rgb, sky & in_disc, have, in_disc, size, rpx, knee)
     sky = None
     med = np.median(rgb[seen_disc][::97], axis=0) if seen_disc.any() else np.full(3, 128.0)
@@ -1056,6 +1114,8 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
              100 * rec["disc_texels_colored"], rec["seconds"])
     if white is not None:
         rec.update(white_texels=int(white.sum()))
+    if sky_smoothed:
+        rec.update(sky="as imaged; the far texels above the skyline's circle smoothed", sky_texels_smoothed=int(sky_smoothed))
     return {"V": Vo[keep], "F": remap[Fo], "uv": UVo[keep], "texture": rgb, "record": rec, "shell": out_shell, "white": white}
 
 
@@ -1329,6 +1389,22 @@ def _part_files(folder: Path, kind: str) -> Optional[Tuple[Path, Path, Path]]:
     return None
 
 
+def glb_texture(path: PathLike, kind: str) -> bytes:
+    """The JPEG bytes of a part's texture for a .glb: the file itself, or - the rover's, made at ROVER_TEXTURE_PX - a
+    copy reduced to ROVER_GLB_PX (1.0.1: the 8k texture stays beside the .glb, a headset is served 4k)."""
+    data = Path(path).read_bytes()
+    if kind != "rover":
+        return data
+    import cv2
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None or max(img.shape[:2]) <= ROVER_GLB_PX:
+        return data
+    k = ROVER_GLB_PX / float(max(img.shape[:2]))
+    small = cv2.resize(img, (int(round(img.shape[1] * k)), int(round(img.shape[0] * k))), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    return buf.tobytes() if ok else data
+
+
 def assemble_scape(folder: PathLike, rover_folder: Optional[PathLike] = None, out: Optional[PathLike] = None) -> Optional[Dict[str, Any]]:
     """0.99.32: ``<prefix>_station_scape.glb`` in ``folder`` - the fifth mode's file: the meshes "terrain" (the near
     terrain), "horizon" (the shell, on the terrain's texture - so it comes after it in the file; the viewer draws it
@@ -1350,7 +1426,7 @@ def assemble_scape(folder: PathLike, rover_folder: Optional[PathLike] = None, ou
         recs["terrain"] = {}
     if rp is not None:
         with np.load(rp[0]) as z:
-            parts.append(("rover", z["V"], z["F"], z["uv"], rp[1].read_bytes()))
+            parts.append(("rover", z["V"], z["F"], z["uv"], glb_texture(rp[1], "rover")))
         try:
             recs["rover"] = json.loads(rp[2].read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1384,7 +1460,7 @@ def assemble(folder: PathLike, rover_folder: Optional[PathLike] = None, out: Opt
         if files is None:
             continue
         with np.load(files[0]) as z:
-            parts.append((kind, z["V"], z["F"], z["uv"], files[1].read_bytes()))
+            parts.append((kind, z["V"], z["F"], z["uv"], glb_texture(files[1], kind)))
         try:
             recs[kind] = json.loads(files[2].read_text(encoding="utf-8"))
         except (OSError, ValueError):

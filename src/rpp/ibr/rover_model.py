@@ -36,6 +36,13 @@ SAMPLE_SPACING_M = 0.012          # the model's surface sampled about this dense
 _cache: Dict[str, Any] = {}
 
 
+# 1.0.1 (Christian, 21 Nov 2026, Van Zyl: "the back middle horizontal piece of the rover behind the rtg can go down a
+# little and rotate to the right"; "try a quick manual nudge of 1 cm down, 2 deg clockwise and see if that improves it"):
+# a part moved down and turned clockwise (seen from above) about its own center - (down m, clockwise deg).  The piece is
+# taken to be the high-gain antenna, the one part of the model that is posed on its own (a neutral pose, not the sol's)
+PART_NUDGE = {"antenna": (0.01, 2.0)}
+
+
 def available() -> bool:
     return FILE.is_file()
 
@@ -45,7 +52,21 @@ def load(parts: Optional[Sequence[str]] = None) -> Tuple[np.ndarray, np.ndarray,
     arm, arm_base, suspension, wheels, mast, antenna; ``meta["parts"]``)."""
     if "raw" not in _cache:
         d = np.load(FILE)
-        _cache["raw"] = (d["vertices"].astype(float), d["faces"].astype(np.int64), d["part"], json.loads(str(d["meta"])))
+        V0, F0, P0, meta0 = d["vertices"].astype(float), d["faces"].astype(np.int64), d["part"], json.loads(str(d["meta"]))
+        for name, (down_m, cw_deg) in PART_NUDGE.items():        # 1.0.1: a part set by eye against the Navcam frames
+            if name not in meta0["parts"] or not (down_m or cw_deg):
+                continue
+            own = np.unique(F0[P0 == meta0["parts"].index(name)])
+            other = np.unique(F0[P0 != meta0["parts"].index(name)])
+            own = np.setdiff1d(own, other)                       # a vertex another part shares stays
+            if not len(own):
+                continue
+            c = V0[own].mean(axis=0)
+            a_ = np.radians(float(cw_deg))                       # clockwise seen from above: x (forward) toward y (right)
+            R = np.array([[np.cos(a_), -np.sin(a_), 0.0], [np.sin(a_), np.cos(a_), 0.0], [0.0, 0.0, 1.0]])
+            V0[own] = (V0[own] - c) @ R.T + c + np.array([0.0, 0.0, float(down_m)])     # z is down
+            meta0.setdefault("nudged", {})[name] = {"down_m": float(down_m), "clockwise_deg": float(cw_deg)}
+        _cache["raw"] = (V0, F0, P0, meta0)
     V, F, P, meta = _cache["raw"]
     if parts is not None:
         ids = [meta["parts"].index(p) for p in parts]

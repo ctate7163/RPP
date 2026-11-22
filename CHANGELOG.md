@@ -20,6 +20,15 @@ The development history before 1.0 is in
   The list stays with the run (a restart at logon keeps it; `--zcam-sites all` ends it).  For the 21 Nov restart of
   freeze 3: Seitah Overlook, Issole / Seitah South and the four other blocks the Sun-distance term brightens by 16 %
   or more (Belva, Rochette, Chal Rocks large, South Arm).
+- Full 3D texture: projected from the pivot itself, the panorama's center (0.5 m above it until 1.0) - no sliver of
+  unseen ground behind each rock, colored from other frames, outlines it.  The sky is the frames' own (not white):
+  far texels keep their colors below the skyline's circle (the hazy crater rim and the delta at Van Zyl had been
+  whitened as sky) and are a 3 deg Gaussian mean of the far texels above it (`station_mesh.smooth_sky`).
+- A station rendered from Mastcam-Z frames (the Z34 versions) takes the pivot of its Navcam frames, not one fitted
+  to the Mastcam-Z centers.
+- Rover: charts to 50 deg and 1 m (35 deg, 0.6 m: 21,800 charts on the model, now 14,200); the texture is made
+  and kept at 8192 px and reduced to 4096 px in the viewer's .glb files; the antenna part 1 cm down and 2 deg
+  clockwise (`rover_model.PART_NUDGE`, set by eye).
 - Publishing: a station run with no station to publish (its station skipped) rebuilds no entry.  An empty list
   was read as "every station": the viewer's list got local paths for the 17 stations of the output root and
   nothing was uploaded (21 Nov 17:14, from a 1.0.0rc1 run).
