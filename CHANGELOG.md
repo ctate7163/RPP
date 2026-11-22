@@ -9,6 +9,21 @@ The development history before 1.0 is in
 [`docs/history/`](https://github.com/ctate7163/rpp/tree/main/docs/history): `CHANGELOG_v0p95-v0p99.md`,
 `CHANGELOG_v0p90-v0p94.md`, `CHANGELOG_v0p13-v0p85.md` and `CHANGELOG_v0p1-v0p12.md`.
 
+## 1.0.3 — 21 Nov 2026 (branch v1p01)
+- A new version number, so that every station is made again on the code of this evening (a station is "done" only
+  when it was made by the running code): the sky of the full 3D texture from the panorama, sheets under the surface
+  textured like the surface, the hue-preserving 8-bit roll-off, the Navcam left / right factor, the 8192 px rover
+  texture, the stern cross piece, the welcome view.
+- JOSS figures (`make_figures.bat` stood still on them): a block's dense cloud is read in parts, cropped to the
+  figure's area and thinned to 12 M points as it is read (it was loaded whole and sorted); isolated points are
+  counted on the occupied cells (one far point made a very large grid); the manifest's camera models are read once,
+  not at every stop; image names of `images.bin` are read in blocks.  Every figure with data prints its steps with
+  the seconds since it began, so a slow step names itself.
+- JOSS figures, the note of 21 Nov: figure 2 panel titles 8.5 pt and the Sol 52 left eye x 1.03 (figure only;
+  `FIG2_LEFT_GAIN`); figure 3 tilt 1.5 deg (was 3) and the Van Zyl cloud's colors x 1.25 (colored from images of the
+  earlier brightness); the paper's files `figure1.png` ... `figure4.png` are copies of the diagram and the Sol 52 /
+  Van Zyl versions.
+
 ## 1.0.2 — 21 Nov 2026 (branch v1p01; numbered 1.0.1.dev0 and 1.0.2.dev0 during the day)
 - Brightness: the scale of every camera x 1.1 (`color.scale_rad_to_int16` 2e5 -> 2.2e5; for some hours of 21 Nov a
   key of its own, `color.brightness_gain`).  The level had been set on blocks imaged near perihelion; the

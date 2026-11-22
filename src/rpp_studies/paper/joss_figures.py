@@ -49,6 +49,19 @@ SUN = np.array([-0.45, -0.35, 0.82]) / np.linalg.norm([-0.45, -0.35, 0.82])
 MODEL_DIR = Path("colmap") / "sparse" / "cahv_ba"
 
 
+_T0: List[Any] = [0.0, None]
+
+
+def _say(text: str) -> None:
+    """One progress line with the seconds since the figure began (a slow step names itself). The figure's own
+    heading is printed with the first of them: a skipped figure stays one line."""
+    import time
+    if _T0[1]:
+        print(_T0[1], flush=True)
+        _T0[1] = None
+    print(f"    {time.time() - _T0[0]:6.0f} s  {text}", flush=True)
+
+
 class Skip(Exception):
     """An input of a figure is not there: the entry is skipped with this message."""
 
@@ -89,12 +102,15 @@ def read_images_bin(model: PathLike, want: Optional[set] = None) -> Dict[str, Di
             head = fh.read(64)
             qw, qx, qy, qz, tx, ty, tz = struct.unpack_from("<7d", head, 4)
             cid, = struct.unpack_from("<i", head, 60)
-            nm = bytearray()
-            while True:
-                c = fh.read(1)
-                if c in (b"\0", b""):
+            pos = fh.tell()
+            buf = fh.read(256)
+            while b"\0" not in buf:
+                more = fh.read(256)
+                if not more:
                     break
-                nm += c
+                buf += more
+            nm = buf.split(b"\0", 1)[0]
+            fh.seek(pos + len(nm) + 1)
             k, = struct.unpack("<Q", fh.read(8))
             fh.seek(24 * k, 1)
             name = nm.decode("utf-8", "replace")
@@ -120,16 +136,71 @@ def read_points3d_bin(model: PathLike) -> Dict[str, np.ndarray]:
     return {"xyz": P, "rgb": C, "error": E, "track": L}
 
 
-def read_cloud(ply: PathLike) -> Tuple[np.ndarray, np.ndarray]:
-    """(xyz, rgb uint8) of a fused cloud (COLMAP's binary PLY)."""
-    from rpp.sfm.dense import read_ply_vertices
-    _, d = read_ply_vertices(ply)
-    X = np.stack([d["x"], d["y"], d["z"]], 1).astype(np.float64)
-    if "red" in d.dtype.names:
-        RGB = np.stack([d["red"], d["green"], d["blue"]], 1).astype(np.uint8)
-    else:
-        RGB = np.full((len(X), 3), 160, np.uint8)
+CLOUD_MAX_POINTS = 12_000_000   # a figure draws at most this many points of a cloud (a block's cloud can hold 10x that)
+
+
+def read_cloud(ply: PathLike, center: Optional[Sequence[float]] = None, within_m: Optional[float] = None,
+               max_points: int = CLOUD_MAX_POINTS) -> Tuple[np.ndarray, np.ndarray]:
+    """(xyz, rgb uint8) of a fused cloud (COLMAP's binary PLY), read in parts from the file: only the points within
+    ``within_m`` of ``center`` (x, y), and at most ``max_points`` of them (every k-th point)."""
+    from rpp.sfm.dense import _PLY_TYPES
+    with open(ply, "rb") as fh:
+        head = b""
+        while not head.endswith(b"end_header\n"):
+            ln = fh.readline()
+            if not ln:
+                raise ValueError(f"{ply}: no end_header")
+            head += ln
+        start = fh.tell()
+    txt = head.decode("ascii", "replace").splitlines()
+    if "format binary_little_endian 1.0" not in txt:
+        raise ValueError(f"{ply}: not a binary little-endian PLY")
+    n, fields, inside = 0, [], False
+    for ln in txt:
+        w = ln.split()
+        if w[:2] == ["element", "vertex"]:
+            n, inside = int(w[2]), True
+        elif w[:1] == ["element"]:
+            inside = False
+        elif inside and w[:1] == ["property"] and len(w) == 3:
+            fields.append((w[2], _PLY_TYPES[w[1]]))
+    d = np.memmap(ply, dtype=np.dtype(fields), mode="r", offset=start, shape=(n,)) if n else np.zeros(0, np.dtype(fields))
+    color = "red" in (d.dtype.names or ())
+    Xs, Cs, step = [], [], 4_000_000
+    for i in range(0, n, step):
+        part = np.asarray(d[i:i + step])
+        X = np.stack([part["x"], part["y"], part["z"]], 1).astype(np.float64)
+        k = np.isfinite(X).all(1)
+        if center is not None and within_m:
+            k &= np.hypot(X[:, 0] - center[0], X[:, 1] - center[1]) < within_m
+        Xs.append(X[k])
+        Cs.append(np.stack([part["red"], part["green"], part["blue"]], 1).astype(np.uint8)[k] if color
+                  else np.full((int(k.sum()), 3), 160, np.uint8))
+    X = np.concatenate(Xs) if Xs else np.zeros((0, 3))
+    RGB = np.concatenate(Cs) if Cs else np.zeros((0, 3), np.uint8)
+    if len(X) > max_points:
+        st = int(np.ceil(len(X) / max_points))
+        X, RGB = X[::st], RGB[::st]
     return X, RGB
+
+
+def crowded(X: np.ndarray, cell_m: float = 0.3, least: float = 5.5) -> np.ndarray:
+    """True for the points with at least ``least`` points in their 3 x 3 x 3 cells of ``cell_m`` (isolated points
+    out). Counted on the occupied cells only: one far point does not make a large grid."""
+    if not len(X):
+        return np.zeros(0, bool)
+    V = np.floor((X - np.median(X, 0)) / cell_m).astype(np.int64)
+    V = np.clip(V, -(1 << 19), (1 << 19) - 1) + (1 << 19)
+    key = (V[:, 0] << 42) | (V[:, 1] << 21) | V[:, 2]
+    cells, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
+    tot = np.zeros(len(cells))
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                q = cells + (dx << 42) + (dy << 21) + dz
+                j = np.clip(np.searchsorted(cells, q), 0, len(cells) - 1)
+                tot += np.where(cells[j] == q, cnt[j], 0)
+    return tot[inv.ravel()] >= least
 
 
 def find_block(roots: Sequence[PathLike], pattern: str) -> Optional[Path]:
@@ -375,10 +446,12 @@ FIGURE2 = {
                 "names": ("NLF_0009_0667755636_926RAD_N0030000NCAM05000_0M00LLJ03",
                           "NRF_0009_0667755636_926RAD_N0030000NCAM05000_0M00LLJ06")},
     "sol0052": {"block": "mars2020_sol_0015_van_zyl_overlook*", "freeze": False, "scale": 1,
+                "left_gain": 1.03,
                 "names": ("NLF_0052_0671568531_150RAD_N0032046NCAM02052_0A0295J01",
                           "NRF_0052_0671568531_150RAD_N0032046NCAM02052_0A0295J01")},
 }
 FIG2_FOV_DEG = 95.0
+FIG2_TITLE_PT = 8.5
 
 
 def _processed(block: Path, name: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
@@ -400,7 +473,8 @@ def _processed(block: Path, name: str) -> Tuple[np.ndarray, Optional[np.ndarray]
     return img, m
 
 
-def figure2_navcam(block: Path, names: Sequence[str], out_png: Path, scale: int = 1, dpi: int = DPI) -> Dict[str, Any]:
+def figure2_navcam(block: Path, names: Sequence[str], out_png: Path, scale: int = 1, dpi: int = DPI,
+                   left_gain: float = 1.0) -> Dict[str, Any]:
     """A Navcam pair as processed (masked area half grayed, no-data corners black) and undistorted to one 95-degree
     pinhole camera (masked area and no-data white), through the block's refined camera of each eye."""
     import cv2
@@ -414,7 +488,11 @@ def figure2_navcam(block: Path, names: Sequence[str], out_png: Path, scale: int 
     for j, name in enumerate(names):
         if f"{name}.png" not in ims:
             raise Skip(f"{name} is not in the model {block / MODEL_DIR}")
+        _say(f"{name[:8]}: reading and undistorting")
         img, m = _processed(block, name)
+        if name[1] == "L" and left_gain != 1.0:                  # for the figure only: the left eye brightened
+            img = np.clip(img * float(left_gain), 0, 1)
+            info["left_gain"] = float(left_gain)
         H, W = img.shape[:2]
         mid, w0, h0, p = cams[ims[f"{name}.png"]["camera_id"]]
         p = p.copy()
@@ -430,7 +508,7 @@ def figure2_navcam(block: Path, names: Sequence[str], out_png: Path, scale: int 
         t[nd] = 0.0
         eye = "left" if name[1] == "L" else "right"
         ax[0, j].imshow(np.clip(t, 0, 1))
-        ax[0, j].set_title(f"{lab[j]}. Navcam {eye}, processed; mask in gray", fontsize=TITLE_PT, loc="left")
+        ax[0, j].set_title(f"{lab[j]}. Navcam {eye}, processed; mask in gray", fontsize=FIG2_TITLE_PT, loc="left")
         fo = (W / 2) / np.tan(np.radians(FIG2_FOV_DEG / 2)) / S
         Wo, Ho = W // S, H // S
         xs, ys = np.meshgrid((np.arange(Wo) - Wo / 2 + 0.5) / fo, (np.arange(Ho) - Ho / 2 + 0.5) / fo)
@@ -442,7 +520,7 @@ def figure2_navcam(block: Path, names: Sequence[str], out_png: Path, scale: int 
         inside = (mx >= 0) & (mx <= W - 1) & (my >= 0) & (my <= H - 1) & np.isfinite(mx)
         u[~mo | ~inside] = 1.0
         ax[1, j].imshow(np.clip(u, 0, 1))
-        ax[1, j].set_title(f"{lab[2 + j]}. Navcam {eye}, undistorted; mask blanked", fontsize=TITLE_PT, loc="left")
+        ax[1, j].set_title(f"{lab[2 + j]}. Navcam {eye}, undistorted; mask blanked", fontsize=FIG2_TITLE_PT, loc="left")
         info.setdefault("cameras", []).append({"image": name, "camera_id": ims[f"{name}.png"]["camera_id"],
                                                "model": pycolmap.CameraModelId(mid).name, "size": [W, H],
                                                "mask_kept_pct": round(100 * float(keep.mean()), 1)})
@@ -465,12 +543,13 @@ FIGURE3 = {
                              mesh=("single_sites/Sol0052", "single_sites/Sol0052_S003D2046"), clean=True, half=15.0, res=0.03, minc=3, fill=3,
                              spike=0.08, exag=2.0, c0=(0, 0.0), center_station=("single_sites/Sol0052", "single_sites/Sol0052_S003D2046"),
                              center=(29.925, 6.905), cameras_within_m=16.0, cloud_within_m=60.0, eye=(0.0, -24.0, 7.5),
-                             tgt=(0.0, 4.0, -1.0), focal=3000.0, bar=5, what="Dense point cloud", splat=1, exclude=(), ztop=1.0),
+                             tgt=(0.0, 4.0, -1.0), focal=3000.0, bar=5, what="Dense point cloud", splat=1, exclude=(), ztop=1.0,
+                             bright=1.25),      # the block's 8-bit images are of the brightness before 1.0.1 (sol 52: x 1.25)
     "rockytop": dict(block="mars2020_sol_0460_rockytop*", freeze=True, cloud=None, mesh=("single_sites/Sol0461", "single_sites/Sol0461_S026D0630"),
                      clean=True, half=24.0, res=0.06, minc=2, fill=5, spike=0.15, exag=1.5, c0=(0, 2.0), eye=(0.0, -60.0, 22.0),
                      tgt=(0.0, 6.0, 0.8), focal=4000.0, bar=10, what="Tie points", splat=2, exclude=()),
 }
-PITCH_UP_DEG = 3.0
+PITCH_UP_DEG = 1.5            # 21 Nov: 3 -> 1.5 (a little more tilt down)
 RMAX_M = 50.0
 FIG3_W, FIG3_H = 4000, 1430
 ROVER_MIN_NAVCAM = 6           # a stop gets a rover model when it has this many Navcam frames (a panorama, not a pair)
@@ -496,11 +575,27 @@ class _Im:                                                       # what rover_de
         return self._C
 
 
+def _pose_of(models: Dict[str, Any], rec, names: Sequence[str]) -> Dict[str, Any]:
+    """:func:`rpp.ibr.rover_deck.rover_pose` with the manifest's label camera models given."""
+    from rpp.ibr.rover_deck import label_pose_rnav, pose_from_pairs
+    by_name = {im.name: im for im in rec.images.values()}
+    Rb, Cb, Rr, Cr = [], [], [], []
+    for n in names:
+        im, cm = by_name.get(n), models.get(Path(n).stem)
+        if im is None or cm is None:
+            continue
+        R_cr, C_r = label_pose_rnav(cm)
+        Rb.append(np.asarray(im.cam_from_world().rotation.matrix(), float))
+        Cb.append(np.asarray(im.projection_center(), float))
+        Rr.append(R_cr)
+        Cr.append(C_r)
+    return pose_from_pairs(Rb, Cb, Rr, Cr)
+
+
 def rover_poses(block: Path, cams: Dict[str, Any], exclude: Sequence[str] = ()) -> List[Tuple[str, Dict[str, Any]]]:
     """(stop, the rover's pose in the block) of every stop with ``ROVER_MIN_NAVCAM`` Navcam frames: from the frames'
     label camera models and solved poses (:func:`rpp.ibr.rover_deck.rover_pose`), else a rigid fit of the Navcam pivot
     and the Hazcam centers in RNAV to the aligned centers."""
-    from rpp.ibr.rover_deck import rover_pose
     from rpp.sfm.project import SfmProject
     proj = None
     try:
@@ -508,6 +603,12 @@ def rover_poses(block: Path, cams: Dict[str, Any], exclude: Sequence[str] = ()) 
     except Exception:                                            # noqa: BLE001
         pass
     out = []
+    if proj is not None:                                         # the manifest is read once, not at every stop
+        from rpp.ibr import rover_deck
+        try:
+            models = rover_deck._manifest_models(proj)
+        except Exception:                                        # noqa: BLE001 - the rigid fit below
+            proj = None
     fam2 = np.array([g[:2] for g in cams["groups"]])
     for stop in sorted(set(cams["stop"])):
         if not stop or any(x in stop for x in exclude):
@@ -520,7 +621,7 @@ def rover_poses(block: Path, cams: Dict[str, Any], exclude: Sequence[str] = ()) 
         if proj is not None:
             try:
                 rec = type("R", (), {"images": {i: _Im(n, cams["poses"][n]["R"], cams["poses"][n]["C"]) for i, n in enumerate(names)}})
-                pose = rover_pose(proj, rec, names)
+                pose = _pose_of(models, rec, names)
                 if not pose.get("n"):
                     pose = None
             except Exception:                                    # noqa: BLE001 - the rigid fit below
@@ -617,13 +718,15 @@ def figure3_block(key: str, roots: Dict[str, Optional[Path]], out_png: Path, dpi
         ply = block / cfg["cloud"]
         if not ply.is_file():
             raise Skip(f"no block cloud {ply}")
-        X, RGB = read_cloud(ply)
+        _say(f"reading the cloud {ply.name} ({ply.stat().st_size / 1e6:.0f} MB)")
+        X, RGB = read_cloud(ply, c0[:2], cfg.get("cloud_within_m") or max(70.0, RMAX_M + 5.0))
         err = np.zeros(len(X))
-        info["cloud"] = {"file": str(ply), "points": int(len(X))}
-        if cfg.get("cloud_within_m"):
-            k = np.hypot(X[:, 0] - c0[0], X[:, 1] - c0[1]) < cfg["cloud_within_m"]
-            X, RGB, err = X[k], RGB[k], err[k]
+        info["cloud"] = {"file": str(ply), "points_read": int(len(X))}
+        if cfg.get("bright") and cfg["bright"] != 1.0:           # a cloud colored from images of the earlier brightness
+            RGB = np.clip(RGB.astype(np.float32) * float(cfg["bright"]), 0, 255).astype(np.uint8)
+            info["cloud"]["brightness_factor"] = float(cfg["bright"])
     else:
+        _say("reading the tie points")
         tp = read_points3d_bin(block / MODEL_DIR)
         X, RGB, err = tp["xyz"], tp["rgb"], tp["error"]
         info["tie_points"] = {"points": int(len(X)), "median_error_px": round(float(np.median(err)), 3),
@@ -631,17 +734,14 @@ def figure3_block(key: str, roots: Dict[str, Optional[Path]], out_png: Path, dpi
     if cfg["clean"]:                                             # quality, range, isolated points (for display)
         k = (err < 1.5) & (np.hypot(X[:, 0] - c0[0], X[:, 1] - c0[1]) < 70)
         X, RGB = X[k], RGB[k]
-        Vx = np.floor((X - X.min(0)) / 0.3).astype(np.int64) + 1
-        cnt = np.zeros(tuple(Vx.max(0) + 2), np.uint16)
-        np.add.at(cnt, (Vx[:, 0], Vx[:, 1], Vx[:, 2]), 1)
-        nb = ndi.uniform_filter(cnt.astype(np.float32), 3) * 27
-        k = nb[Vx[:, 0], Vx[:, 1], Vx[:, 2]] >= 5.5
+        k = crowded(X)
         X, RGB = X[k], RGB[k]
     zref = np.median(C[fam == "N", 2]) - 2.0 if (fam == "N").any() else np.median(C[:, 2]) - 2.0
     if cfg.get("ztop") is not None:
         k = X[:, 2] < zref + cfg["ztop"]
         X, RGB = X[k], RGB[k]
     info["shown_points"] = int(len(X))
+    _say(f"{len(X):,} points; the map panels")
     HALF, RES = cfg["half"], cfg["res"]
     n = int(round(2 * HALF / RES)) // 2 * 2                      # even, for the 2 x 2 height cells
     ix = ((X[:, 0] - c0[0] + HALF) / RES).astype(int)
@@ -697,6 +797,7 @@ def figure3_block(key: str, roots: Dict[str, Optional[Path]], out_png: Path, dpi
         tz += 0.05
     V_ = view(tz)
     info["pitch_deg"] = round(float(-np.degrees(np.arcsin(V_.fwd[2]))), 1)
+    _say("the rover poses")
     poses = rover_poses(block, cams, cfg["exclude"]) if rover_model.available() else []
     rovers = []
     if poses:
@@ -715,6 +816,7 @@ def figure3_block(key: str, roots: Dict[str, Optional[Path]], out_png: Path, dpi
         out = img.copy()
         out[show] = np.dstack([g, g, np.clip(g * 1.01, 0, 255)]).astype(np.uint8)[show]
         return out
+    _say(f"the oblique view ({len(poses)} rover models)")
     tv, td, _ = splat(V_, X[k3], RGB[k3], size=cfg["splat"], fill=4)
     panel_c = with_rovers(tv, td)
     panel_d = None
@@ -722,6 +824,7 @@ def figure3_block(key: str, roots: Dict[str, Optional[Path]], out_png: Path, dpi
     mesh_dir = next((base / m for m in cfg.get("mesh") or () if (base / m / "mesh.ply").is_file()),
                     base / cfg["mesh"][0] if cfg.get("mesh") else None)
     if mesh_dir is not None:
+        _say(f"the terrain mesh {mesh_dir.name}")
         mesh = _station_mesh(mesh_dir, c0, RMAX_M)
         if mesh is not None and len(mesh[1]):
             r = raycast(V_, [mesh] + rovers)
@@ -737,6 +840,7 @@ def figure3_block(key: str, roots: Dict[str, Optional[Path]], out_png: Path, dpi
         else:
             info["mesh"] = f"no mesh at {mesh_dir} - panel D left out"
     # ---- the figure
+    _say("drawing")
     fig = plt.figure(figsize=(11, 9.2))
     gs = fig.add_gridspec(2, 2, height_ratios=[1.05, 0.78], hspace=0.12, wspace=0.08)
     ext = [-HALF, HALF, -HALF, HALF]
@@ -904,6 +1008,7 @@ def figure4_station(key: str, roots: Dict[str, Optional[Path]], out_png: Path, d
     for f_, what in ((pano_f, "terrain-only panorama"), (rover_f, "with-rover panorama"), (tex_f, "radial texture")):
         if f_ is None or not Path(f_).is_file():
             raise Skip(f"{label}: no {what} in {d}")
+    _say(f"{d.name}: reading the panoramas and the model")
     pano = np.asarray(Image.open(pano_f).convert("RGB"))
     rov = np.asarray(Image.open(rover_f).convert("RGB"))
     tex = np.asarray(Image.open(tex_f).convert("RGB"))
@@ -923,7 +1028,9 @@ def figure4_station(key: str, roots: Dict[str, Optional[Path]], out_png: Path, d
     r0 /= np.linalg.norm(r0)
     fv = f0 - 0.18 * r0 + np.array([0, -0.12, 0])
     f = (FIG4_PX / 2) / np.tan(np.radians(FIG4_FOV_DEG / 2))
+    _say("rendering the model")
     img = render_scape(parts, View(eye, fv, (0, 1, 0), f, FIG4_PX, FIG4_PX))
+    _say("drawing")
     hh = pano.shape[0] // 2
     FW, TT, G = 8.5, 0.36, 0.06
     ph = FW / 3
@@ -959,7 +1066,8 @@ def entries(roots: Dict[str, Optional[Path]]) -> List[Tuple[str, str, Callable[[
             b = find_block(order, c["block"])
             if b is None:
                 raise Skip(f"no aligned block {c['block']} under {', '.join(str(r) for r in order if r)}")
-            return figure2_navcam(b, c["names"], out, scale=c["scale"])
+            g = os.environ.get("FIG2_LEFT_GAIN")
+            return figure2_navcam(b, c["names"], out, scale=c["scale"], left_gain=float(g) if g else c.get("left_gain", 1.0))
         return make
     return [
         ("figure1", "joss_figure1_pipeline_diagram.png", figure1_pipeline),
@@ -974,6 +1082,9 @@ def entries(roots: Dict[str, Optional[Path]]) -> List[Tuple[str, str, Callable[[
     ]
 
 
+PAPER_FILES = {"figure1": "figure1.png", "figure2b": "figure2.png", "figure3b": "figure3.png", "figure4c": "figure4.png"}
+
+
 def make_all(out: PathLike, root: Optional[PathLike] = None, freeze_root: Optional[PathLike] = None,
              only: Optional[Sequence[str]] = None) -> Dict[str, str]:
     """Every figure of :func:`entries` (or ``only`` these ids) into ``out``: id -> "made" or the reason it was skipped."""
@@ -984,11 +1095,16 @@ def make_all(out: PathLike, root: Optional[PathLike] = None, freeze_root: Option
     for fid, name, make in entries(roots):
         if only and fid not in only:
             continue
+        import time
+        _T0[0], _T0[1] = time.time(), f"JOSS {fid}: making {name} ..."
         try:
             info = make(out / name)
             (out / (Path(name).stem + ".json")).write_text(json.dumps(info, indent=1, default=str), encoding="utf-8")
             done[fid] = "made"
-            print(f"JOSS {fid}: {name}")
+            if fid in PAPER_FILES:                               # the paper's own file names
+                import shutil
+                shutil.copyfile(out / name, out / PAPER_FILES[fid])
+            print(f"JOSS {fid}: {name} ({time.time() - _T0[0]:.0f} s)", flush=True)
         except Skip as e:
             done[fid] = f"skipped: {e}"
             print(f"JOSS {fid}: skipped - {e}")
