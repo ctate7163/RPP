@@ -409,6 +409,7 @@ def tone_soft(x: np.ndarray, knee: float = 190.0, top: float = 255.0) -> np.ndar
     return np.clip(x * s[..., None], 0.0, 255.0)
 
 
+PIPELINE_FADE = 40.0             # 1.0.2: a highlight this far above the knee (8-bit units) has lost 63 % of its color
 PIPELINE_KNEE = 235.0            # 0.98.0: the standard 8-bit view is the pipeline's own 8-bit scale (16-bit / 64) up to here ...
 
 
@@ -421,10 +422,23 @@ def tone_pipeline(x: np.ndarray) -> np.ndarray:
     the white balance: the deck and the sky near the sun came out blue - Van Zyl, 14 Nov)."""
     x = np.asarray(x, np.float32)
     hi = 65535.0 / UNITS_PER_8BIT
-    t = np.clip((x - PIPELINE_KNEE) / (hi - PIPELINE_KNEE), 0.0, 1.0)
+    # 1.0.2 (Christian, 21 Nov 2026, the brighter images of 1.0.1: "this sky artifact showed up" - a white band over the
+    # horizon and purple columns above it.  Van Zyl's sky sits at the knee: 83 % of its blue, 52 % of its red and
+    # 39 % of its green above 235, so rolled off channel by channel the sky changed hue from column to column; the
+    # 16 bits were never near their ceiling - 448 of 1024 at most).  The brightest channel is rolled off and the others
+    # with it (the hue kept), and the color fades to white with the height above the knee (PIPELINE_FADE), so a
+    # highlight still goes to white - the deck, the sky near the sun - but through its own color, not another's.
+    # Nothing changes where no channel is above the knee
+    m = x.max(axis=-1)
+    t = np.clip((m - PIPELINE_KNEE) / (hi - PIPELINE_KNEE), 0.0, 1.0)
     k = (hi - PIPELINE_KNEE) / (255.0 - PIPELINE_KNEE)                # slope 1 at the knee, 0 at the 16-bit ceiling
     y = PIPELINE_KNEE + (255.0 - PIPELINE_KNEE) * (1.0 - (1.0 - t) ** k)
-    return np.clip(np.where(x > PIPELINE_KNEE, y, x), 0.0, 255.0)
+    over = m > PIPELINE_KNEE
+    s = np.where(over, y / np.maximum(m, 1e-6), 1.0)
+    d = np.where(over, 1.0 - np.exp(-(m - PIPELINE_KNEE) / PIPELINE_FADE), 0.0)
+    out = x * s[..., None]
+    out = out * (1.0 - d[..., None]) + (y * d)[..., None]
+    return np.clip(out, 0.0, 255.0)
 
 
 TERRAIN_GRAY = 100.0             # the median of the ground lands here (8-bit), as in the 8-bit pipeline's frames

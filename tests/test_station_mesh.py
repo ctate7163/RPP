@@ -913,3 +913,27 @@ def test_the_sky_keeps_its_hills_and_is_smooth_above_the_skyline():
     row = rgb[int(S / 2 - r_k - 8), :, 0]                                             # a row high in the sky, across the step
     seg = row[S // 2 - 20:S // 2 + 20]
     assert float(np.abs(np.diff(seg)).max()) < 6.0 and 160.0 < float(seg.min()) and float(seg.max()) < 200.5   # a ramp
+
+
+def test_a_sheet_under_the_surface_takes_the_disc_and_bright_sky_keeps_its_hue():
+    """1.0.2: (a) a level sheet 0.1 m under another is "under a sheet", open ground is not; (b) the standard 8-bit view
+    rolls a bright sky off through its own color - no channel order changes, nothing changes below the knee, and far
+    above the knee it is white."""
+    from rpp.ibr import station_mesh as M
+    from rpp.ibr.linear16 import tone_pipeline, PIPELINE_KNEE
+    q = lambda z, s: np.array([[-s, -s, z], [s, -s, z], [s, s, z], [-s, s, z]], float)     # noqa: E731
+    V = np.concatenate([q(0.0, 1.0), q(-0.1, 3.0)])
+    F = np.array([[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]])
+    rc = M._raycaster(V, F)
+    up = (0.0, 0.0, 1.0)
+    got = M.under_a_sheet(rc, np.array([[0.2, 0.1, -0.1], [2.5, 2.5, -0.1], [0.2, 0.1, 0.0]]), up)
+    assert got.tolist() == [True, False, False]
+    sky = np.array([[235.0, 232.0, 248.0], [250.0, 240.0, 270.0], [100.0, 90.0, 80.0], [600.0, 500.0, 700.0]], np.float32)
+    out = tone_pipeline(sky)
+    assert np.allclose(out[2], sky[2])                                         # no channel above the knee: unchanged
+    assert (np.argsort(out[0]) == np.argsort(sky[0])).all() and (np.argsort(out[1]) == np.argsort(sky[1])).all()
+    assert out[0].max() <= 255 and out[0].max() - out[0].min() < sky[0].max() - sky[0].min()      # paler, same hue
+    assert (out[3] > 253).all() and PIPELINE_KNEE == 235.0                     # far above: white
+    ramp = np.stack([np.linspace(200, 400, 201)] * 3, axis=-1).astype(np.float32) * np.array([0.95, 0.9, 1.0], np.float32)
+    o = tone_pipeline(ramp)
+    assert (np.diff(o.max(axis=-1)) >= -1e-3).all() and float(np.abs(np.diff(o, axis=0)).max()) < 2.0    # no step

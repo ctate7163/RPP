@@ -194,6 +194,18 @@ def test_points(V: np.ndarray, F: np.ndarray, shrink: float = 0.25) -> np.ndarra
     return np.concatenate([cen[:, None], tri + shrink * (cen[:, None] - tri)], axis=1)
 
 
+UNDER_SHEET_M = 0.35            # 1.0.2: a triangle with the mesh this near straight above it lies under another sheet
+
+
+def under_a_sheet(rc, pts: np.ndarray, up, max_m: float = UNDER_SHEET_M, off_m: float = 0.003) -> np.ndarray:
+    """1.0.2: True where the mesh in ``rc`` lies within ``max_m`` straight above each point (k, 3) - the fill's
+    underlay beneath the measured surface, the patch under the rover where the two overlap."""
+    u = _unit(up)
+    o = np.asarray(pts, float) + off_m * u
+    t, _ = _cast(rc, o, np.broadcast_to(u, o.shape))
+    return t < float(max_m)
+
+
 def seen_from(rc, pts: np.ndarray, viewpoint: np.ndarray, tol_rel: float = 2e-3, tol_m: float = 2e-3) -> np.ndarray:
     """True where nothing of the mesh in ``rc`` lies between ``viewpoint`` and each point (k, 3)."""
     v = np.asarray(pts, float) - viewpoint
@@ -1023,7 +1035,17 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     view /= np.maximum(np.linalg.norm(view, axis=1), 1e-12)[:, None]
     grazing = np.abs((nrm * view).sum(1)) < GRAZING_COS
     from .mesh import horizontal_distance
-    vis = (seen & ~grazing) | (horizontal_distance(pts[:, 0], P, up) > CELL_RADIUS_M)
+    # 1.0.2 (Christian, 21 Nov 2026, Van Zyl: "the mesh still has a hole in front of the rover"; "here is the mesh
+    # discontinuity" - gray slivers along the outline of the patch under the rover): the mesh's sheets are not sewn
+    # where the fill meets the measured ground, and through the cracks one saw the sheet beneath - hidden from C, so
+    # textured from a cell, in a fill's tone (within 6 m of Van Zyl's mast 119 m2 of level ground was in cells).  A
+    # hidden triangle that lies right under another sheet takes the disc like the sheet above it: seen through a
+    # crack it shows the picture that belongs there
+    under = np.ones(len(F), bool)
+    for j in range(pts.shape[1]):
+        under &= under_a_sheet(rc, pts[:, j], up)
+    under &= ~seen
+    vis = (seen & ~grazing) | (under & ~grazing) | (horizontal_distance(pts[:, 0], P, up) > CELL_RADIUS_M)
     used = np.unique(F[vis])
     th = np.arccos(np.clip(((V[used] - C) / np.linalg.norm(V[used] - C, axis=1)[:, None]) @ -up, -1, 1))
     theta_max = float(min(np.pi * 0.995, th.max() + np.radians(0.5)))
@@ -1095,6 +1117,7 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     rec.update(texture_px=size, center_above_pivot_m=float(center_above_m), theta_max_deg=round(float(np.degrees(theta_max)), 2),
                triangles_from_center=int(vis.sum()), triangles_in_cells=int(len(hid)),
                hidden_from_center=int((~seen).sum()), edge_on_from_center=int((seen & grazing).sum()),
+               under_a_sheet=int(under.sum()),
                cell_texel_mm=None if cells["texel_m"] is None else round(1000 * cells["texel_m"], 2),
                disc_texels_colored=round(float(seen_disc.sum() / max(n_disc_texels, 1)), 4),
                disc_texels_filled=int(filled.sum()), cell_texels_filled=int(cell_filled),

@@ -33,6 +33,13 @@ The development history before 1.0 is in
 - Publishing: a station run with no station to publish (its station skipped) rebuilds no entry.  An empty list
   was read as "every station": the viewer's list got local paths for the 17 stations of the output root and
   nothing was uploaded (21 Nov 17:14, from a 1.0.0rc1 run).
+- Standard 8-bit view (`linear16.tone_pipeline`): above the knee (235) the brightest channel is rolled off and the
+  others with it, and the color fades to white (`PIPELINE_FADE`).  Rolled off channel by channel, a sky at the knee
+  changed hue - a white band over the horizon and purple columns above it in the brighter images of 1.0.1.  Nothing
+  changes where no channel is above the knee.  The 16 bits had headroom throughout (Van Zyl: 448 of 1024 at most).
+- Full 3D texture: a hidden triangle that lies within 0.35 m under another sheet of the mesh takes the disc like
+  the sheet above it (`station_mesh.under_a_sheet`).  The fill's sheets are not sewn to the measured ground, and
+  through the cracks one saw the sheet beneath in a cell's fill tone - gray slivers along the patch under the rover.
 - Navcam left and right: `color.brightness_by_eye` {"NL": 0.980, "NR": 1.021} - right / left 0.96.  On 11 stereo
   pairs of sols 72-1601 (RAD products, matched points) the right eye's radiance is 0.955 of the left's (median;
   pairs 0.90-0.98); another measurement gave about 0.97.  Re-estimating the flat fields is parked.
