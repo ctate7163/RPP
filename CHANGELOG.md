@@ -27,8 +27,9 @@ The development history before 1.0 is in
 - A station rendered from Mastcam-Z frames (the Z34 versions) takes the pivot of its Navcam frames, not one fitted
   to the Mastcam-Z centers.
 - Rover: charts to 50 deg and 1 m (35 deg, 0.6 m: 21,800 charts on the model, now 14,200); the texture is made
-  and kept at 8192 px and reduced to 4096 px in the viewer's .glb files; the antenna part 1 cm down and 2 deg
-  clockwise (`rover_model.PART_NUDGE`, set by eye).
+  and kept at 8192 px and reduced to 4096 px in the viewer's .glb files; the stern cross piece of the body (the 0.72 m
+  wide piece at x -1.71..-1.47 and its fittings) 1 cm down and 2 deg clockwise (`rover_model.PART_NUDGE`, set by
+  eye; for an hour it was on the high-gain antenna, the wrong piece).
 - Publishing: a station run with no station to publish (its station skipped) rebuilds no entry.  An empty list
   was read as "every station": the viewer's list got local paths for the 17 stations of the output root and
   nothing was uploaded (21 Nov 17:14, from a 1.0.0rc1 run).

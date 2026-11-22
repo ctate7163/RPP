@@ -37,10 +37,50 @@ _cache: Dict[str, Any] = {}
 
 
 # 1.0.1 (Christian, 21 Nov 2026, Van Zyl: "the back middle horizontal piece of the rover behind the rtg can go down a
-# little and rotate to the right"; "try a quick manual nudge of 1 cm down, 2 deg clockwise and see if that improves it"):
-# a part moved down and turned clockwise (seen from above) about its own center - (down m, clockwise deg).  The piece is
-# taken to be the high-gain antenna, the one part of the model that is posed on its own (a neutral pose, not the sol's)
-PART_NUDGE = {"antenna": (0.01, 2.0)}
+# little and rotate to the right"; "try a quick manual nudge of 1 cm down, 2 deg clockwise and see if that improves it";
+# then, with the piece marked in a picture - the wide edge at the stern, beyond the white box: "no, I mean this part"):
+# pieces of a part moved down and turned clockwise (seen from above) about their common center.  A piece is the
+# connected pieces of ``part`` that lie wholly inside ``box`` (RMECH: x forward, y right, z down; min corner, max
+# corner).  The stern cross piece: the 0.72 m wide one at x -1.71..-1.47 with its fittings.  (For an hour the nudge
+# was on the high-gain antenna - the wrong piece.)
+PART_NUDGE = [{"name": "stern cross piece", "part": "body", "box": ((-1.73, -0.37, -0.48), (-1.43, 0.37, -0.04)),
+               "down_m": 0.01, "clockwise_deg": 2.0}]
+
+
+def _nudge(V0: np.ndarray, F0: np.ndarray, P0: np.ndarray, meta0: Dict[str, Any]) -> None:
+    """:data:`PART_NUDGE` applied to ``V0`` in place; what was moved goes into ``meta0["nudged"]``."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    for spec in PART_NUDGE:
+        if spec["part"] not in meta0["parts"] or not (spec.get("down_m") or spec.get("clockwise_deg")):
+            continue
+        sel = np.flatnonzero(P0 == meta0["parts"].index(spec["part"]))
+        if not len(sel):
+            continue
+        Fp = F0[sel]
+        _, inv = np.unique(np.round(V0 * 1e4).astype(np.int64), axis=0, return_inverse=True)
+        inv = np.asarray(inv).ravel()
+        Fw = inv[Fp]
+        n = int(inv.max()) + 1
+        g = coo_matrix((np.ones(3 * len(Fw)), (np.r_[Fw[:, 0], Fw[:, 1], Fw[:, 2]], np.r_[Fw[:, 1], Fw[:, 2], Fw[:, 0]])), shape=(n, n))
+        _, lab = connected_components(g, directed=False)
+        fl = lab[Fw[:, 0]]
+        lo, hi = np.asarray(spec["box"][0], float), np.asarray(spec["box"][1], float)
+        vmin = np.full(n, np.inf)[:, None].repeat(3, 1)
+        vmax = -vmin
+        np.minimum.at(vmin, lab[inv], V0)
+        np.maximum.at(vmax, lab[inv], V0)
+        inside = np.unique(fl[((vmin[fl] >= lo) & (vmax[fl] <= hi)).all(axis=1)])
+        own = np.unique(Fp[np.isin(fl, inside)])
+        if not len(own):
+            continue
+        c = 0.5 * (V0[own].min(axis=0) + V0[own].max(axis=0))
+        a_ = np.radians(float(spec.get("clockwise_deg") or 0.0))   # clockwise seen from above: x (forward) toward y (right)
+        R = np.array([[np.cos(a_), -np.sin(a_), 0.0], [np.sin(a_), np.cos(a_), 0.0], [0.0, 0.0, 1.0]])
+        V0[own] = (V0[own] - c) @ R.T + c + np.array([0.0, 0.0, float(spec.get("down_m") or 0.0)])     # z is down
+        meta0.setdefault("nudged", {})[spec["name"]] = {"down_m": float(spec.get("down_m") or 0.0), "clockwise_deg": float(spec.get("clockwise_deg") or 0.0),
+                                                        "pieces": int(len(inside)), "vertices": int(len(own)),
+                                                        "bounds": [[round(float(x), 3) for x in V0[own].min(axis=0)], [round(float(x), 3) for x in V0[own].max(axis=0)]]}
 
 
 def available() -> bool:
@@ -53,19 +93,7 @@ def load(parts: Optional[Sequence[str]] = None) -> Tuple[np.ndarray, np.ndarray,
     if "raw" not in _cache:
         d = np.load(FILE)
         V0, F0, P0, meta0 = d["vertices"].astype(float), d["faces"].astype(np.int64), d["part"], json.loads(str(d["meta"]))
-        for name, (down_m, cw_deg) in PART_NUDGE.items():        # 1.0.1: a part set by eye against the Navcam frames
-            if name not in meta0["parts"] or not (down_m or cw_deg):
-                continue
-            own = np.unique(F0[P0 == meta0["parts"].index(name)])
-            other = np.unique(F0[P0 != meta0["parts"].index(name)])
-            own = np.setdiff1d(own, other)                       # a vertex another part shares stays
-            if not len(own):
-                continue
-            c = V0[own].mean(axis=0)
-            a_ = np.radians(float(cw_deg))                       # clockwise seen from above: x (forward) toward y (right)
-            R = np.array([[np.cos(a_), -np.sin(a_), 0.0], [np.sin(a_), np.cos(a_), 0.0], [0.0, 0.0, 1.0]])
-            V0[own] = (V0[own] - c) @ R.T + c + np.array([0.0, 0.0, float(down_m)])     # z is down
-            meta0.setdefault("nudged", {})[name] = {"down_m": float(down_m), "clockwise_deg": float(cw_deg)}
+        _nudge(V0, F0, P0, meta0)                                # 1.0.1: a piece set by eye against the Navcam frames
         _cache["raw"] = (V0, F0, P0, meta0)
     V, F, P, meta = _cache["raw"]
     if parts is not None:
