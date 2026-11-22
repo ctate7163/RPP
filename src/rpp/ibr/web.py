@@ -227,14 +227,33 @@ def welcome_pano(web: Path, station_entry: Optional[Dict[str, Any]], pano_dir: O
     if var is None:
         return None
     # 1.0.1 (Christian, 21 Nov 2026: "remove the gray tone of the welcome screen version of vanzyl. Instead, use the Raw
-    # color as the first skin"): Van Zyl's own pictures, not muted copies (0.98.4 gray, 0.98.14-1.0 muted colors); the
-    # raw ("original") color first, so the welcome view opens in it.  The copies of before are removed
+    # color as the first skin"): Van Zyl's own pictures, not muted copies (0.98.4 gray, 0.98.14-1.0 muted colors).
+    # The copies of before are removed
     for f in (web / "panos").glob(f"{WELCOME_ID}*{STACK}") if (web / "panos").is_dir() else ():
         f.unlink()
+    return welcome_from(station_entry)
+
+
+def welcome_from(station_entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """1.0.1 (Christian, 21 Nov 2026: "the welcome screen should be the same as van zyl just with the original color and
+    the welcome text with the controls"): the welcome entry from Van Zyl's entry as it stands - every variant of it
+    (stereo, the rover, full 3D, the drive) with its own files; the page opens it in the original color (HOME_VIEW in
+    rpp/viewer/index.html) and draws the words.  Made again after an upload (:func:`rpp.ibr.hf.publish`), when Van
+    Zyl's files have their addresses on the dataset.  None without a variant with the standard view."""
+    import copy
+    vs = (station_entry or {}).get("variants", [])
+    var = next((v for v in vs if v.get("key") == "masked" and v.get("views", {}).get("standard")), None) or \
+        next((v for v in vs if v.get("views", {}).get("standard")), None)
+    if var is None:
+        return None
     views = {k: str(v) for k, v in var["views"].items()}
     if WELCOME_FIRST_VIEW in views:
         views = {WELCOME_FIRST_VIEW: views[WELCOME_FIRST_VIEW], **{k: v for k, v in views.items() if k != WELCOME_FIRST_VIEW}}
-    return _welcome_entry(views)
+    entry = _welcome_entry(views)
+    if all(v.get("key") for v in vs):
+        entry["variants"] = copy.deepcopy(vs)
+        entry["welcome_of"] = station_entry.get("id")
+    return entry
 
 
 def _welcome_entry(views) -> Dict[str, Any]:

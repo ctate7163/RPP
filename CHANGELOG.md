@@ -33,6 +33,9 @@ The development history before 1.0 is in
 - Publishing: a station run with no station to publish (its station skipped) rebuilds no entry.  An empty list
   was read as "every station": the viewer's list got local paths for the 17 stations of the output root and
   nothing was uploaded (21 Nov 17:14, from a 1.0.0rc1 run).
+- Welcome view: Van Zyl's own entry with every variant (stereo, rover, full 3D), opened in the original color, made
+  again after an upload so its files have their dataset addresses; WEST in the sky only with the info page; the
+  "Mars 2020 Perseverance rover" line lower, blue in orange; the home button 40 px, white at home, orange elsewhere.
 - Viewer: full 3D is the default terrain mode (a station opens in it where it has it, until the visitor chooses
   another); the welcome view shows Van Zyl's own pictures, not muted copies, and opens in the original (raw) color.
 - Freeze: the blocks' own mask checkpoint file is passed to every site run (`Run.mask_set`).  A run whose chosen

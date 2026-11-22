@@ -3175,8 +3175,9 @@ def test_welcome_picture_keeps_its_color_and_the_map_gets_an_orthomosaic(tmp_pat
     vz = {"variants": [{"key": "rover", "views": {"standard": "panos/R_360_3DTD.jpg"}},
                        {"key": "masked", "views": {"standard": "panos/S_360_3DTD.jpg", "raw color": "https://x/S_raw_360_3DTD.jpg",
                                                    "dcs color": "panos/S_dcs_360_3DTD.jpg"}}]}
-    v2 = web.welcome_pano(w, vz)["variants"][0]["views"]
-    assert list(v2) == ["raw color", "standard", "dcs color"] and v2["raw color"] == "https://x/S_raw_360_3DTD.jpg"
+    e2 = web.welcome_pano(w, vz)                # every variant of Van Zyl's entry, its own files; a copy, not the entry
+    assert [v["key"] for v in e2["variants"]] == ["rover", "masked"] and e2["welcome"] and e2["welcome_of"] is None
+    assert e2["variants"][1]["views"]["raw color"] == "https://x/S_raw_360_3DTD.jpg" and e2["variants"] is not vz["variants"]
     assert not list((w / "panos").glob("welcome*")) and (w / "panos" / "S_360_3DTD.jpg").is_file()
     # the map's picture
     rasterio = pytest.importorskip("rasterio")
