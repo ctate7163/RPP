@@ -353,7 +353,17 @@ class Run:
     # --------------------------------------------------------------- the mask model
     def mask_set(self) -> Optional[str]:
         """The ``mask_checkpoint`` setting of every pipeline call: None when the blocks' own model stays."""
-        return (self.status.get("mask") or {}).get("set") or None
+        m = self.status.get("mask") or {}
+        if m.get("set"):
+            return m["set"]
+        # 1.0.1 (21 Nov 2026, freeze 3 continued on 1.0.1: every block failed in a minute, "mask model 'rpp_mask_v5'
+        # is not in the cache"): a run whose chosen model is the blocks' own checkpoint FILE recorded no setting
+        # ("same"), and the site runs then took the code's default - a registry name, another configuration, and
+        # one that is not on this computer.  The blocks' own file is set explicitly, as "keep" always did
+        cur = m.get("current")
+        if cur and Path(str(cur)).suffix.lower() in (".pt", ".pth", ".safetensors") and Path(str(cur)).is_file():
+            return str(cur)
+        return None
 
     def s_mask(self) -> str:
         a = self.a

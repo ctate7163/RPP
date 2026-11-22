@@ -659,3 +659,18 @@ def test_zcam_sites_limit_the_joints_step_and_stay_with_the_run(tmp_path):
     last = [ln for ln in (root / "mppp_pipeline" / fz.LOG_FILE).read_text(encoding="utf-8").splitlines()
             if "--redo zcam_runs zcam_joints" in ln][-1]
     assert "--zcam-sites" not in last
+
+
+def test_the_blocks_own_mask_file_is_set_for_every_pipeline_call(tmp_path):
+    """1.0.1 (21 Nov 2026): a freeze whose chosen mask model is the blocks' own checkpoint file ("set": None in its
+    status) still passes that file to the site runs - without it they took the code's default registry name."""
+    root = _root(tmp_path)
+    ck = tmp_path / "convnext_v5p2_2.pt"
+    ck.write_bytes(b"x")
+    r = fz.Run.__new__(fz.Run)
+    r.status = {"mask": {"state": "done", "choice": str(ck), "set": None, "current": str(ck)}}
+    assert r.mask_set() == str(ck)
+    r.status = {"mask": {"state": "done", "choice": "keep (rpp_mask_v5)", "set": None, "current": None}}
+    assert r.mask_set() is None
+    r.status = {"mask": {"state": "done", "choice": "x.pt", "set": "x.pt", "current": str(ck)}}
+    assert r.mask_set() == "x.pt"

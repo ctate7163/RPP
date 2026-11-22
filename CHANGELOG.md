@@ -20,6 +20,9 @@ The development history before 1.0 is in
   The list stays with the run (a restart at logon keeps it; `--zcam-sites all` ends it).  For the 21 Nov restart of
   freeze 3: Seitah Overlook, Issole / Seitah South and the four other blocks the Sun-distance term brightens by 16 %
   or more (Belva, Rochette, Chal Rocks large, South Arm).
+- Freeze: the blocks' own mask checkpoint file is passed to every site run (`Run.mask_set`).  A run whose chosen
+  model was that same file recorded no setting, and on 1.0.1 the site runs took the default registry name
+  `rpp_mask_v5`, which was not on the computer: every block of the 21 Nov restart failed within a minute.
 - Mastcam-Z ZCAM08323 (sol 298, Issole; a focus sweep looking down 25 to 60 degrees) is in the low focus state
   (`298:ZCAM08323` in the shipped list): in the 21 Nov Z34 joint its left eye measured 4669.0 / 4677.5 / 4689.6 px
   at focus 138 / 516 / 786, on the low line (4678.8 / 4688.4 / 4695.2) and 1 % under the high line; run as high it
