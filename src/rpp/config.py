@@ -81,8 +81,10 @@ _DEFAULTS: Dict[str, Any] = {
         # implement a scale difference to bring them into agreement"): a factor per camera (family + eye) on top of
         # the family's.  Measured on 11 Navcam stereo pairs of sols 72-1601 (RAD products, SIFT matches, 9 x 9 px
         # means at 52-1,638 matched points a pair): right / left = 0.955 (median; pairs 0.90-0.98, sd 0.024; R 0.961,
-        # G 0.951, B 0.964).  Split between the eyes so that the Navcam level stays: left x 0.977, right x 1.023
-        "brightness_by_eye": {"NL": 0.977, "NR": 1.023},
+        # G 0.951, B 0.964); another measurement of the day gave about 0.97.  "use a 0.96 factor now, and park the idea
+        # of re-estimating flat fields" (the pairs' spread points at the flat fields).  Split between the eyes so that
+        # the Navcam level stays: left x 0.980, right x 1.021 (right / left of the corrected images: 1)
+        "brightness_by_eye": {"NL": 0.980, "NR": 1.021},
         # 1.0.1 (Christian, 21 Nov 2026: "I set the brightness scale in order to not make rockytop and bright angel
         # too bright. Now that [we] know about the x0.82 effect, we can increase the scale by about x1.1"; "color.
         # brightness_gain should be the same as scale ... multiply scale for all the cameras by that gain"): the

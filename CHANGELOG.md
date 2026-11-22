@@ -33,8 +33,9 @@ The development history before 1.0 is in
 - Publishing: a station run with no station to publish (its station skipped) rebuilds no entry.  An empty list
   was read as "every station": the viewer's list got local paths for the 17 stations of the output root and
   nothing was uploaded (21 Nov 17:14, from a 1.0.0rc1 run).
-- Navcam left and right: `color.brightness_by_eye` {"NL": 0.977, "NR": 1.023}.  On 11 stereo pairs of sols 72-1601
-  (RAD products, matched points) the right eye's radiance is 0.955 of the left's (median; pairs 0.90-0.98).
+- Navcam left and right: `color.brightness_by_eye` {"NL": 0.980, "NR": 1.021} - right / left 0.96.  On 11 stereo
+  pairs of sols 72-1601 (RAD products, matched points) the right eye's radiance is 0.955 of the left's (median;
+  pairs 0.90-0.98); another measurement gave about 0.97.  Re-estimating the flat fields is parked.
 - The version is 1.0.2.
 - Welcome view: Van Zyl's own entry with every variant (stereo, rover, full 3D), opened in the original color, made
   again after an upload so its files have their dataset addresses; WEST in the sky only with the info page; the

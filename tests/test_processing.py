@@ -536,9 +536,10 @@ def test_hazcam_white_balance_is_its_own_and_only_hazcam_frames_are_made_again(t
 
 
 def test_navcam_eyes_have_their_own_brightness():
-    """1.0.2: right / left = 0.955 on 11 Navcam stereo pairs - the left eye x 0.977, the right x 1.023, the product 1."""
+    """1.0.2: right / left = 0.96 (0.955 on 11 Navcam stereo pairs, about 0.97 elsewhere) - the left eye x 0.980, the
+    right x 1.021, the product 1."""
     from rpp import default_config, load_config
     e = default_config()["color"]["brightness_by_eye"]
-    assert e == {"NL": 0.977, "NR": 1.023} and e["NL"] * e["NR"] == pytest.approx(1.0, abs=1e-3)
-    assert (e["NL"] / e["NR"]) == pytest.approx(0.955, abs=2e-3)
+    assert e == {"NL": 0.980, "NR": 1.021} and e["NL"] * e["NR"] == pytest.approx(1.0, abs=1e-3)
+    assert (e["NL"] / e["NR"]) == pytest.approx(0.96, abs=2e-3)
     assert load_config({"color": {"brightness_by_eye": {"NL": 1.0}}})["color"]["brightness_by_eye"]["NL"] == 1.0
