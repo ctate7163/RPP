@@ -26,7 +26,7 @@ file names and output records.  Until 0.98 the package was called MPPP; the name
 that spelling (:mod:`rpp.ondisk`), so earlier blocks are read as they are.
 """
 
-__version__ = "1.0.1.dev0"
+__version__ = "1.0.2.dev0"
 
 
 def _tag(version: str) -> str:

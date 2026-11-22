@@ -211,7 +211,7 @@ def radiometry_key(cfg: Dict[str, Any]) -> str:
     c = cfg.get("color") or {}
     part = {"radiometry": cfg.get("radiometry") or {},
             "color": {k: c.get(k) for k in ("enhance", "white_balance_ecam", "white_balance_hazcam", "white_balance_zcam",
-                                            "white_balance_vce", "brightness_by_family", "scale_rad_to_int16")}}
+                                            "white_balance_vce", "brightness_by_family", "brightness_by_eye", "scale_rad_to_int16")}}
     return hashlib.sha1(json.dumps(part, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 

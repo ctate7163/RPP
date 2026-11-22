@@ -335,6 +335,9 @@ class RPPImage:
             wb = [1.0, 1.0, 1.0]
         self.white_balance = np.asarray(wb, dtype=np.float64)
         self.brightness = float((c.get("brightness_by_family") or {}).get(self.fn.family, 1.0))
+        # 1.0.2: the camera's own factor (Navcam left / right; color.brightness_by_eye), in the same number
+        self.brightness_eye = float((c.get("brightness_by_eye") or {}).get(str(self.fn.camera_group)[:2].upper(), 1.0) or 1.0)
+        self.brightness *= self.brightness_eye
 
     def _radiance_rgb(self, dn: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         L = self.label
@@ -574,7 +577,7 @@ class RPPImage:
             "tau_estimated": self.tau_estimated, "tau_reference": self.tau_ref,
             "scale_zenith": self.scale_zenith, "scale_sun_distance": self.scale_sun_distance,   # 1.0.1: in scale_zenith
             "white_balance": self.white_balance.tolist(),
-            "brightness": self.brightness, "lmst_h": self.lmst_h, "saturated_fraction": self.saturated_fraction,
+            "brightness": self.brightness, "brightness_eye": self.brightness_eye, "lmst_h": self.lmst_h, "saturated_fraction": self.saturated_fraction,
             "radiance_scaling_factor": self.scale_dn_to_rad, "radiance_offset": self.offset_dn_to_rad,
             "camera_group": self.fn.camera_group,
             "stereo_partner": self.fn.stereo_partner_stem,

@@ -76,6 +76,13 @@ _DEFAULTS: Dict[str, Any] = {
         # Z = Mastcam-Z).  0.99.22: the ecams 8 % brighter than before, at Mastcam-Z's level (N 0.990 x 1.08,
         # F/R 1.104 x 1.079); to 0.99.21 it was {"N": 0.9} with the level in the balances
         "brightness_by_family": {"N": 1.069, "F": 1.191, "R": 1.191, "Z": 1.0},
+        # 1.0.2 (Christian, 21 Nov 2026: "are navcam left and right frames generally at the same brightness or is
+        # there a bias by 1-5 % ... Other sources indicate that the right/left brightness ratio is about 0.97 ...
+        # implement a scale difference to bring them into agreement"): a factor per camera (family + eye) on top of
+        # the family's.  Measured on 11 Navcam stereo pairs of sols 72-1601 (RAD products, SIFT matches, 9 x 9 px
+        # means at 52-1,638 matched points a pair): right / left = 0.955 (median; pairs 0.90-0.98, sd 0.024; R 0.961,
+        # G 0.951, B 0.964).  Split between the eyes so that the Navcam level stays: left x 0.977, right x 1.023
+        "brightness_by_eye": {"NL": 0.977, "NR": 1.023},
         # 1.0.1 (Christian, 21 Nov 2026: "I set the brightness scale in order to not make rockytop and bright angel
         # too bright. Now that [we] know about the x0.82 effect, we can increase the scale by about x1.1"; "color.
         # brightness_gain should be the same as scale ... multiply scale for all the cameras by that gain"): the
@@ -166,7 +173,7 @@ def default_config() -> Dict[str, Any]:
 
 
 def _deep_merge(base: Dict[str, Any], over: Dict[str, Any], path: str = "") -> Dict[str, Any]:
-    open_maps = ("color.brightness_by_family", "masking.skip_inference_at")      # any key is a value here
+    open_maps = ("color.brightness_by_family", "color.brightness_by_eye", "masking.skip_inference_at")      # any key is a value here
     if path in open_maps:
         base.update(over)
         return base
