@@ -68,7 +68,8 @@ def test_sun_distance_in_the_zenith_scale():
     r = default_config()["radiometry"]
     assert r["apply_sun_distance"] is True and r["sun_distance_reference_au"] == pytest.approx(1.5237)
     c = default_config()["color"]                      # 1.0.1: the scale of every camera x 1.1, no gain of its own
-    assert c["scale_rad_to_int16"] == pytest.approx(2.2e5) and "brightness_gain" not in c
+    assert c["scale_rad_to_int16"] == pytest.approx(1.76e5) and "brightness_gain" not in c
+    assert c["scale_rad_to_int16"] / c["scale_int8_to_int16"] == pytest.approx(2.2e5 / 64)      # the 8-bit level
 
 
 def test_quantize_reserves_zero_for_invalid():
@@ -81,7 +82,7 @@ def test_quantize_reserves_zero_for_invalid():
     valid = np.array([[True, True], [True, False]])
     i16, i8 = quantize(rad, valid, default_config()["color"])
     assert i16.dtype == np.uint16 and i8.dtype == np.uint8
-    assert i16[0, 0, 0] == 11000 and i8[0, 0, 0] == round(11000 / 64)          # 1.0.1: 2.2e5 counts per unit
+    assert i16[0, 0, 0] == 8800 and i8[0, 0, 0] == round(11000 / 64)           # 1.0.1: 1.76e5 counts per unit, 8-bit as at 2.2e5 / 64
     assert i16[0, 1, 0] == 1 and i8[0, 1, 0] == 1                    # valid never 0
     assert i16[1, 0, 0] == 65535 and i8[1, 0, 0] == 255
     assert not i16[1, 1].any() and not i8[1, 1].any()

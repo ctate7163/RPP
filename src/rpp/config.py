@@ -84,8 +84,12 @@ _DEFAULTS: Dict[str, Any] = {
         # by 0.82; with the new scale they end at 0.90 of their old level and the aphelion blocks (Belva, Seitah,
         # Chal Rocks) at 1.31.  A block processed before 1.0.1 holds 2e5 in its saved configuration: its station
         # frames get the factor from rpp.ibr.linear16.block_config (SCALE_GAIN_1P01).
-        "scale_rad_to_int16": 2.2e5,
-        "scale_int8_to_int16": 64,
+        # 1.0.1 (Christian, 21 Nov 2026: "The 16-bit images should be a little dimmer to avoid saturations ... the 16
+        # bit values are lower but the 8 bit values are the same"; "lower the 16 bit by 1.25"): 2.2e5 / 1.25 = 1.76e5
+        # counts per unit of radiance, and 64 / 1.25 = 51.2 of them per 8-bit count - the 8-bit image is the same
+        # (2.2e5 / 64 = 1.76e5 / 51.2), the 16-bit ceiling is 5 x 8-bit white (was 4 x)
+        "scale_rad_to_int16": 1.76e5,
+        "scale_int8_to_int16": 51.2,
         "offset_int8_to_int16": 0.0,
         "apply_gamma": False,     # applies to the 8-bit product only
         "gamma": 2.0,

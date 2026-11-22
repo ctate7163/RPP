@@ -135,6 +135,12 @@ def block_config(project) -> Dict[str, Any]:
                 # level as a block processed today (color.scale_rad_to_int16 2e5 -> 2.2e5)
                 if "apply_sun_distance" not in (user.get("radiometry") or {}):
                     cfg["color"]["scale_rad_to_int16"] = float(cfg["color"]["scale_rad_to_int16"]) * SCALE_GAIN_1P01
+                # 1.0.1: the station frames keep UNITS_PER_8BIT (64) of their counts per 8-bit count whatever the
+                # block's own 16-bit scale is (1.76e5 with 51.2 since 1.0.1, 2e5 with 64 before) - the station code
+                # reads them in 8-bit units, value / 64
+                c = cfg["color"]
+                c["scale_rad_to_int16"] = float(c["scale_rad_to_int16"]) * UNITS_PER_8BIT / float(c["scale_int8_to_int16"])
+                c["scale_int8_to_int16"] = UNITS_PER_8BIT
                 return cfg
     raise FileNotFoundError(f"no processed/mppp_config_v*.json for {project.root}")
 

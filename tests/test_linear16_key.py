@@ -80,3 +80,21 @@ def test_frames_carry_their_provenance_scales_and_position(tmp_path):
     assert read_png_chunks(f).get("eXIf")                                # the Mars position as EXIF GPS
     pos = L.station_position(L.block_manifest(proj), [name])
     assert pos["LatitudePlanetocentricDeg"] == 18.4586 and pos["ElevationAreoidM"] == -2523.2 and "IAU 2000" in pos["Datum"]
+
+
+def test_station_frames_keep_their_scale_whatever_the_blocks_16_bit_scale(tmp_path):
+    """1.0.1: a block processed today (16-bit 1.76e5, 51.2 per 8-bit count) and one processed before 1.0.1 (2e5, 64,
+    no Sun distance) give station frames of the same level: 2.2e5 counts per unit of radiance, 64 per 8-bit count."""
+    import json
+    from types import SimpleNamespace
+    import pytest
+    import rpp
+    from rpp.ibr import linear16 as L
+    for name, snap in (("new", rpp.default_config()),
+                       ("old", {"color": {"scale_rad_to_int16": 2e5, "scale_int8_to_int16": 64}, "radiometry": {"tau_reference": 0.3}})):
+        blk = tmp_path / name
+        (blk / "processed").mkdir(parents=True)
+        (blk / "colmap").mkdir()
+        (blk / "processed" / "mppp_config_v1p0.json").write_text(json.dumps({"config": snap}))
+        c = L.block_config(SimpleNamespace(root=blk / "colmap", settings={}))["color"]
+        assert c["scale_rad_to_int16"] == pytest.approx(2.2e5) and c["scale_int8_to_int16"] == 64, name
