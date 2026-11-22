@@ -698,6 +698,9 @@ def busy_elsewhere(run: Dict[str, Any], mine: Sequence[str] = ()) -> bool:
         return False
 
 
+FIRST_ALIAS = {"oeb": "butler_landing", "octavia_e_butler": "butler_landing"}   # --first oeb: the landing site's block
+
+
 def run_order(runs: List[Dict[str, Any]], pairs: Optional[Dict[str, str]] = None, first: Sequence[str] = (),
               reverse: bool = False) -> List[Dict[str, Any]]:
     """0.99.50 (Christian, 20 Nov 2026: "always runs rockytop first and then goes to the end of the mission and runs
@@ -705,6 +708,7 @@ def run_order(runs: List[Dict[str, Any]], pairs: Optional[Dict[str, str]] = None
     others by sol - the latest first with ``reverse``; a Mastcam-Z version stays right after its Navcam station."""
     import re
     anchor = {z: n for n, z in (pairs or {}).items()}
+    names = [FIRST_ALIAS.get(str(f).lower(), str(f).lower()) for f in first]
 
     def sol(lab):
         m = re.match(r"^Sol(\d+)", str(lab))
@@ -713,9 +717,10 @@ def run_order(runs: List[Dict[str, Any]], pairs: Optional[Dict[str, str]] = None
     def key(r):
         a_ = anchor.get(r["label"], r["label"])
         own = next((x for x in runs if x["label"] == a_), r)
-        grp = 0 if any(f.lower() in Path(own["work"]).name.lower() for f in first) else 1
+        nm = Path(own["work"]).name.lower()                  # 1.0.3: the names of ``first`` in the order given
+        grp = next((i for i, f in enumerate(names) if f in nm), len(names))
         s_ = sol(a_)
-        return (grp, s_ if grp == 0 or not reverse else -s_, a_, r["label"] != a_)
+        return (grp, s_ if grp < len(names) or not reverse else -s_, a_, r["label"] != a_)
     return sorted(runs, key=key)
 
 

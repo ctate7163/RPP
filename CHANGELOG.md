@@ -23,6 +23,10 @@ The development history before 1.0 is in
   `FIG2_LEFT_GAIN`); figure 3 tilt 1.5 deg (was 3) and the Van Zyl cloud's colors x 1.25 (colored from images of the
   earlier brightness); the paper's files `figure1.png` ... `figure4.png` are copies of the diagram and the Sol 52 /
   Van Zyl versions.
+- Station runs: `--first rockytop oeb --reverse` runs the names of `--first` in the order given (they were mixed by
+  sol), then the others from the latest sol back; `oeb` is the landing site's block (butler_landing).
+- Viewer: the screen controls begin with the space bar, and the arrows are named apart (right: next site, left:
+  previous site); the phone's two buttons too.
 
 ## 1.0.2 — 21 Nov 2026 (branch v1p01; numbered 1.0.1.dev0 and 1.0.2.dev0 during the day)
 - Brightness: the scale of every camera x 1.1 (`color.scale_rad_to_int16` 2e5 -> 2.2e5; for some hours of 21 Nov a

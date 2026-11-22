@@ -590,6 +590,9 @@ def test_freeze3_root_block_order_busy_and_recolor(tmp_path):
                                               first=["rockytop"], reverse=True)]
     assert order == ["Sol0461", "Sol0477", "Sol0484_S026D1004_Z34", "Sol1955",
                      "Sol0670", "Sol0670_Z34", "Sol0009"]
+    order = [r["label"] for r in SS.run_order(runs, {"Sol0477": "Sol0484_S026D1004_Z34", "Sol0670": "Sol0670_Z34"},
+                                              first=["rockytop", "oeb"], reverse=True)]     # 1.0.3: in the order given
+    assert order == ["Sol0461", "Sol0477", "Sol0484_S026D1004_Z34", "Sol0009", "Sol1955", "Sol0670", "Sol0670_Z34"]
     assert SS._made_by_0p99({"rpp": "0.99.50"}) and not SS._made_by_0p99({"rpp": "0.98.31"})
     assert SS._made_by_0p99({"finished": "2026-11-19T18:24:54"}) and not SS._made_by_0p99({"finished": "2026-11-10T01:00:00"})
     r = runs[1]
