@@ -22,7 +22,14 @@ The full 3D model only; meshes, depth maps and panoramas are those of 1.0.4.
   range so that the triangles are smaller near the rover.  Measured against the top surface of `mesh.ply`:
   Van Zyl, 95 % of places within 1.3 mm at 1-4 m and 2.7 mm at 14-20 m (1.0.4: 6.4 and 30 mm); Rockytop Sol0461, median
   0.2 - 0.3 mm (1.0.4: 3.5 mm near, 19 mm far).  Triangle edges at Van Zyl: 5.6 cm at 2-4 m, 11 cm beyond 10 m (9 - 10 cm
-  everywhere before).  What one sheet gives up is the underside of an overhang.  `TOP_SHEET = False` is the terrain of
+  everywhere before).  The simplification goes in passes that each keep half of the triangles, and the sheet is
+  repaired after every pass (`simplify_in_steps`, `repair_sheet`: triangles without area, repeated ones and edges
+  of more than two triangles removed; a triangle folded over smoothed out, or dropped and its hole closed) - four
+  passes from 4.0 million at Van Zyl, 1,409 / 628 / 313 / 4 folds put right, none left, no open edge inside the sheet.
+  The rocks by the rover (within 6 m, where the ground rises 8 cm in 25 cm) are checked against the grid after the
+  last pass and the record says how far off they are (`top_sheet.near_rocks`; Van Zyl: 1.0 mm at 95 % of 20,886
+  places, 1.7 mm at 99 %, 17 mm at the worst one); over 3 mm at 95 % the sheet is simplified again with 1.3 times
+  the triangles.  What one sheet gives up is the underside of an overhang.  `TOP_SHEET = False` is the terrain of
   before; a failure of the sheet falls back to it with a warning.
 - **Hidden ground takes colors grown in from its seen edges** (`grown_vertex_colors`, `grow_cells`).  A triangle the
   mast does not see has a cell of its own; a cell's texels no frame colored took one flat color per cell - the flat,
@@ -40,6 +47,11 @@ The full 3D model only; meshes, depth maps and panoramas are those of 1.0.4.
   stations made on 1.0.4 get their models again (about a quarter of an hour each), not their panoramas (an hour).
   The model made alone reads the panorama's sky from the 16-bit file of the run before and writes the texture's
   color skins.
+- Viewer: the Beta label is to the right of the steering wheel; B held for 0.7 s starts the drive where the station
+  has it, or ends it (the keyboard's B and the right controller's B; a short press is still stereo / full 3D, done
+  when the button comes up); the stick's click no longer starts the drive.
+- Viewer: a station without the full 3D model is left out of the page (the list keeps it; `?all=1` shows every
+  station); it shows again when a run uploads its model.
 - Not in this version: the mesh's own cracks (`mesh.ply` is as 1.0.4 makes it; the panoramas, rendered from the mast,
   do not show them), and the white disc at the base of the rock at Van Zyl (in the panorama itself; origin not found).
 

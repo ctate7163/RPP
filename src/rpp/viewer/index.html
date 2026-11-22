@@ -103,7 +103,8 @@ if (location.hostname === 'ctate7163.github.io' && (/^\/(RPP|MPPP)\/ods(\/|$)/i.
   #nav button#driveBtn { position: absolute; left: 0; bottom: calc(100% + 6px); display: none; }
   /* 0.99.40 (Christian: "The steering wheel icon should have a Beta next to it indicating that it is an experimental
      feature") */
-  #driveBeta { position: absolute; right: calc(100% + 6px); bottom: calc(100% + 18px); display: none; font-size: 11px;
+  /* 1.0.5 (Christian, 22 Nov 2026: "Move the beta icon to the right side of the drive mode button") */
+  #driveBeta { position: absolute; left: calc(100% + 6px); bottom: calc(100% + 18px); display: none; font-size: 11px;
                font-weight: 700; color: #fc6; background: #222c; border: 1px solid #f90; border-radius: 4px; padding: 1px 5px; }
   /* 1.0.1: a phone's fingers - larger targets for the buttons (the device class: body data-device) */
   body[data-device="phone"] #nav button, body[data-device="phone"] #compass button, body[data-device="phone"] #home { min-width: 44px; min-height: 44px; }
@@ -802,14 +803,14 @@ function showWelcome(on) {
     ctlHeadset = place(textPanel([{ text: 'trigger: next site   |   left trigger: back   |   stick: turn', px: 84, weight: 600 },
                                  { text: 'X: info and map   |   Y: home   |   A: view', px: 84, weight: 600 },
                                  { text: 'B: stereo / 3D   |   grip: rover on / off   |   hold Y: leave VR', px: 84, weight: 600 },
-                                 { text: 'stick click: drive (beta)   |   driving: sticks forward / back, left / right turn', px: 84, weight: 600 }],
+                                 { text: 'hold B: drive (beta)   |   driving: sticks forward / back, left / right turn', px: 84, weight: 600 }],
                                 { back: 'rgba(0,0,0,0.35)', uniform: true }), WELCOME_AZ_DEG, -6, 5, 3.6);   // 0.99.14: one size
     // 0.99.37 (Christian, 19 Nov 2026: "In the browser 2d version. Show a differ set of controls, including using the
     // space bar to change the color map"): on a screen the keys and the mouse instead
     ctlScreen = place(textPanel([{ text: 'space: color map   |   \u2192: next site   |   \u2190: previous site   |   V: terrain', px: 84, weight: 600 },   // 1.0.3 (Christian, 21 Nov 2026: "put the space bar first, and split the right and left arrows to next site and previous site")
                                  { text: 'drag or W A S D: look   |   wheel: zoom   |   N E S W O: face   |   L: eye', px: 84, weight: 600 },
                                  { text: 'I: info and map   |   H: home   |   B: stereo / full 3D   |   R: rover on / off', px: 84, weight: 600 },
-                                 { text: 'P: motion   |   steering wheel button: drive the rover (beta)   |   driving: arrow keys', px: 84, weight: 600 }],
+                                 { text: 'P: motion   |   steering wheel button or hold B: drive (beta)   |   driving: arrow keys', px: 84, weight: 600 }],
                                 { back: 'rgba(0,0,0,0.35)', uniform: true }), WELCOME_AZ_DEG, -6, 5, 3.6);
     // 1.0.1: a phone's controls (touch and tilt), and a headset's browser before it enters VR (the VR button first)
     ctlPhone = place(textPanel([{ text: 'swipe: look   |   pinch: zoom   |   tilt the phone: move the eye', px: 84, weight: 600 },
@@ -820,7 +821,7 @@ function showWelcome(on) {
     ctlHeadsetOut = place(textPanel([{ text: 'press the VR button at the bottom to step into the station', px: 84, weight: 700, color: MARK_BLUE },
                                      { text: 'in VR: trigger: next site   |   left trigger: back   |   stick: turn', px: 84, weight: 600 },
                                      { text: 'X: info and map   |   Y: home   |   A: view   |   B: stereo / 3D', px: 84, weight: 600 },
-                                     { text: 'grip: rover on / off   |   stick click: drive (beta)   |   hold Y: leave VR', px: 84, weight: 600 }],
+                                     { text: 'grip: rover on / off   |   hold B: drive (beta)   |   hold Y: leave VR', px: 84, weight: 600 }],
                                     { back: 'rgba(0,0,0,0.35)', uniform: true }), WELCOME_AZ_DEG, -6, 5, 3.6);
     welcome.add(ctlHeadset, ctlScreen, ctlPhone, ctlHeadsetOut);
   }
@@ -1331,7 +1332,23 @@ window.addEventListener('keydown', e => {
   else if (e.key === 'p' || e.key === 'P') { motionOn = !motionOn; }     // 0.99.32: the screen's eye movement on / off
   else if (e.key === 'i' || e.key === 'I') toggleInfo();
   else if (e.key === 'h' || e.key === 'H') goHome();                     // 0.98.28: as the headset's Y
-  else if (e.key === 'b' || e.key === 'B') stereoOrFull();               // 0.98.28: as the headset's B (0.99.41: stereo / full 3D)
+  else if (e.key === 'b' || e.key === 'B') {                             // 0.98.28: as the headset's B (0.99.41: stereo / full 3D)
+    // 1.0.5 (Christian, 22 Nov 2026: "Enter it by holding B"): B held for HOLD_B_MS starts the drive where the station
+    // has it (or ends it); a short press is stereo / full 3D, done when the key comes up
+    if (!e.repeat && !bKey) bKey = { timer: setTimeout(() => { bKey.done = true; driveByHold(); }, HOLD_B_MS), done: false };
+  }
+});
+const HOLD_B_MS = 700;
+let bKey = null;
+function driveByHold() {
+  if (mode === 'drive' || variants(panos[cur.s] || {}).some(q => q.key === 'drive3d')) driveToggle();
+}
+window.addEventListener('keyup', e => {
+  if ((e.key === 'b' || e.key === 'B') && bKey) {
+    clearTimeout(bKey.timer);
+    if (!bKey.done) stereoOrFull();
+    bKey = null;
+  }
 });
 
 // ---------------------------------------------------------------- looking around on a screen
@@ -1517,7 +1534,7 @@ function pressed(src, i) {                       // button i of this controller 
   held.set(key, is);
   return is && !was;
 }
-let stickL = 0, stickR = 0, stickTurn = 0, yDown = 0, yDone = false;
+let stickL = 0, stickR = 0, stickTurn = 0, yDown = 0, yDone = false, bDown = 0, bDone = false;
 function buttons(dt) {                           // xr-standard: button 4 is A (right) / X (left), button 5 is B (right) / Y (left)
   const session = renderer.xr.getSession();
   if (!session) return;
@@ -1533,12 +1550,17 @@ function buttons(dt) {                           // xr-standard: button 4 is A (
       if (down && !yDown) { yDown = now; yDone = false; }
       if (down && !yDone && now - yDown > 1000) { yDone = true; session.end(); return; }
       if (!down && yDown) { if (!yDone) goHome(); yDown = 0; }
-    } else if (pressed(src, 5)) stereoOrFull();
+    } else {                                                     // 1.0.5: B held - the drive; a short press: stereo / full 3D
+      const down = !!(gp.buttons[5] && gp.buttons[5].pressed), now = performance.now();
+      if (down && !bDown) { bDown = now; bDone = false; }
+      if (down && !bDone && now - bDown > HOLD_B_MS) { bDone = true; driveByHold(); }
+      if (!down && bDown) { if (!bDone) stereoOrFull(); bDown = 0; }
+    }
     if (false) { if (left) goHome(); else stereoOrFull(); }         // 0.98.28: Y (left): home, facing west; B (right): 0.99.41 stereo / full 3D
     // 0.99.40 (Christian, 19 Nov 2026: "In VR mode, enter driving/ steering mode with a click on the joystick. Left and
     // right still rotate the view and forward and back on the left and right controler works in like skid steering"):
     // a thumbstick click (xr-standard button 3) starts the drive where the station has it, and ends it
-    if (pressed(src, 3) && (mode === 'drive' || variants(panos[cur.s] || {}).some(q => q.key === 'drive3d'))) driveToggle();
+    // 1.0.5 (Christian, 22 Nov 2026: "Enter it by holding B"): the stick's click no longer starts or ends the drive
     if (DRIVE.on) {                                              // 0.99.33: a stick's forward / back axis is its side's track
       const y = -(gp.axes.length >= 4 ? gp.axes[3] : (gp.axes[1] || 0));
       const t = Math.abs(y) > STICK_DEAD ? Math.sign(y) * (Math.abs(y) - STICK_DEAD) / (1 - STICK_DEAD) : 0;
@@ -1645,6 +1667,13 @@ diagnostics();
   try {
     const j = await (await fetch(index, { cache: 'no-cache' })).json();
     panos = j.panos || j;
+    // 1.0.5 (Christian, 22 Nov 2026: "From the viewer, let's remove or hide all sites that don't have full-3d models"):
+    // a station without the full 3D model is left out of the page; the list keeps it, and it shows again once its
+    // model is made and uploaded.  ?all=1 shows every station of the list
+    if (new URLSearchParams(location.search).get('all') !== '1') {
+      const with3d = panos.filter(p => p.welcome || variants(p).some(q => q.key === 'scape3d'));
+      if (with3d.some(p => !p.welcome)) panos = with3d;
+    }
     traverse = j.traverse || null;
     if (traverse && traverse.ortho && traverse.ortho.file)       // the map's orbital picture: small, fetched once
       fetch(new URL(traverse.ortho.file, base).href).then(r => r.blob()).then(createImageBitmap)

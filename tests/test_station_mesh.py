@@ -276,7 +276,7 @@ def test_viewer_terrain_modes_rover_button_and_hidden_drive():
               "} else if (Math.abs(x) > STICK_DEAD) {", "$('driveBtn').onclick = driveToggle;",
               "if (isWhole(vr)) return null;", "if (!whole) {", "rk !== 'no-rover'", "roverOn = false, roverId = 0",
               "c.addEventListener('squeezestart', () => roverToggle());", "session.end(); return;",
-              "grip: rover on / off   |   hold Y: leave VR", 'id="driveBeta"', "if (pressed(src, 3) &&",
+              "grip: rover on / off   |   hold Y: leave VR", 'id="driveBeta"', "if (down && !bDone && now - bDown > HOLD_B_MS) { bDone = true; driveByHold(); }",
               "outlineWidth: 0.14, spacing: 0.12", "az, 24, 40, 10.5", "const on = welcome.visible || infoPanel.visible;",
               "#title { font-weight: 600; margin-right: 6px; color: #fff; }", "#bar button#home, #compass button#faceO { color: #ff9500; }",
               "const MAP_ORANGE = '#ff9500';", "#nav button#roverBtn { color: #ff9500; }", "#nav button#roverBtn.on { color: #fff; border-color: #555; }",
@@ -287,8 +287,17 @@ def test_viewer_terrain_modes_rover_button_and_hidden_drive():
     nav = page[page.index('<div id="nav">'):page.index('<div id="msg">')]
     assert nav.index('id="driveBtn"') < nav.index('id="roverBtn"') and "#nav button#driveBtn { position: absolute;" in page
     assert "lastRoverKey" not in page and "grip: rover on, off, 3D, 3D terrain" not in page
-    drive = page[page.index("if (pressed(src, 3) &&"):page.index("const x = gp.axes.length >= 4")]
+    drive = page[page.index("if (DRIVE.on) {                                              // 0.99.33"):page.index("const x = gp.axes.length >= 4")]
     assert "continue;" not in drive                               # in the drive the sticks still turn the view
+    # 1.0.5 (Christian, 22 Nov 2026: "Move the beta icon to the right side of the drive mode button. Enter it by
+    # holding B"): the label right of the wheel; B held starts the drive (keys and the right controller), a short
+    # press is still stereo / full 3D; the stick's click no longer starts it
+    assert "#driveBeta { position: absolute; left: calc(100% + 6px);" in page and "pressed(src, 3)" not in page
+    assert "if (!bKey.done) stereoOrFull();" in page and "if (!down && bDown) { if (!bDone) stereoOrFull(); bDown = 0; }" in page
+    assert "hold B: drive (beta)" in page and "stick click: drive" not in page
+    # Christian, 22 Nov 2026: "From the viewer, let's remove or hide all sites that don't have full-3d models"
+    assert "const with3d = panos.filter(p => p.welcome || variants(p).some(q => q.key === 'scape3d'));" in page
+    assert "get('all') !== '1'" in page and "if (with3d.some(p => !p.welcome)) panos = with3d;" in page
 
 
 def test_station_mesh_textures_kept_in_16_bits_and_retoned_as_the_panoramas(tmp_path):
@@ -975,7 +984,7 @@ def test_the_full_3d_sky_is_the_panoramas_above_the_skyline():
     assert n > 0 and np.allclose(rgb[high], 210.0, atol=0.5) and np.allclose(rgb[hill], before)
 
 
-def test_the_viewers_terrain_is_one_sheet_with_smaller_triangles_near_the_rover():
+def test_the_viewers_terrain_is_one_sheet_with_smaller_triangles_near_the_rover(monkeypatch):
     """1.0.5 (Christian, 21 and 22 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; "There are still some
     holes though"): top_sheet makes one sheet of a mesh of several - a ground with a crack in it, a second sheet under
     the crack and an unsewn box on it: one height per place (the top), the crack raised to its rim, no rim inside the
@@ -993,8 +1002,21 @@ def test_the_viewers_terrain_is_one_sheet_with_smaller_triangles_near_the_rover(
     V = np.vstack([Vg, Vu, Vb])
     F = np.vstack([Fg, Fu + len(Vg), Fb + len(Vg) + len(Vu)])
     P, up = np.array([0.0, 0.0, 2.0]), np.array([0.0, 0.0, 1.0])
+    monkeypatch.setattr(SM, "TOP_ROCK_P95_MM", 1e6)                    # (the box's walls on a 5 cm grid: no limit here)
     Vt, Ft, rec = SM.top_sheet(V, F, P, up, 10.0, 40000, step_m=0.05)
     assert rec["no_surface"] == 0 and rec["pits_raised"] > 50 and 30000 < len(Ft) <= 40000
+    # Christian, 22 Nov 2026: "The simplification should simplify iteratively, reducing polygon count by ~50% repairing
+    # the mesh, then repeat until target poly count is met. Make sure not to simply the rocks in front of the rover too
+    # much": passes of a half each, the sheet repaired after every one, and the rocks by the rover held to the grid
+    ps = rec["passes"]
+    assert len(ps) >= 3 and all(0.45 < q["to"] / q["from"] < 0.56 for q in ps[:-1]) and ps[-1]["to"] == len(Ft)
+    assert all({"removed", "folded", "folds_dropped", "holes_closed"} <= set(q) for q in ps)
+    assert (SM.triangle_normals(Vt, Ft)[0] @ up > 0).all()            # no triangle folded over
+    nr = rec["near_rocks"]
+    assert nr["places"] > 100 and nr["within_m"] == 6.0 and nr["p95_mm"] < 60 and nr["triangles"] == len(Ft)
+    monkeypatch.setattr(SM, "TOP_ROCK_P95_MM", 1e-3)                   # a limit the rocks cannot meet: more triangles,
+    _, F2, rec2 = SM.top_sheet(V, F, P, up, 10.0, 40000, step_m=0.05)  # twice at most
+    assert 40000 * 1.3 * 1.3 * 0.9 < len(F2) <= 40000 * 1.3 * 1.3 and rec2["near_rocks"]["p95_mm"] <= nr["p95_mm"]
     rc = SM._raycaster(Vt, Ft)
     xy = rng.uniform(-9, 9, (4000, 2))
     xy = xy[np.hypot(xy[:, 0], xy[:, 1]) < 9]

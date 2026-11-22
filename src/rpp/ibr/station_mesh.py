@@ -152,11 +152,17 @@ TOP_PIT_WIDTH_M = 0.12          # a pit narrower than this ...
 TOP_PIT_DEPTH_M = 0.04          # ... and deeper than this is a crack between two sheets: raised to its rim
 TOP_NEAR_M = 2.0                # the simplified triangles are of one size within this of the mast axis ...
 TOP_RANGE_POWER = 0.6           # ... and grow with the range to this power beyond (0: one size everywhere)
+TOP_ROCKS_TO_M = 6.0            # the rocks by the rover: the places within this of the mast axis ...
+TOP_ROCK_RELIEF_M = 0.08        # ... where the surface rises or falls this much within 0.25 m
+TOP_ROCK_P95_MM = 3.0           # the simplified sheet is within this of the sampled surface at 95 % of them, or the
+TOP_ROCK_MORE = 1.3             # simplification is done again with this many times the triangles (twice at most)
 
 
-def _range_warp(X: np.ndarray, P: np.ndarray, back: bool = False, near_m: float = TOP_NEAR_M, power: float = TOP_RANGE_POWER) -> np.ndarray:
-    """The points about ``P`` scaled by (range / near_m) ** -power beyond ``near_m`` (range in 3D from P), or back.
-    Simplifying in the scaled space leaves triangles that grow with the range: more of them near the rover."""
+def _range_warp(X: np.ndarray, P: np.ndarray, back: bool = False) -> np.ndarray:
+    """The points about ``P`` scaled by (range / TOP_NEAR_M) ** -TOP_RANGE_POWER beyond ``TOP_NEAR_M`` (range in 3D
+    from P), or back.  Simplifying in the scaled space leaves triangles that grow with the range: more of them near
+    the rover."""
+    near_m, power = float(TOP_NEAR_M), float(TOP_RANGE_POWER)
     v = np.asarray(X, float) - P
     r = np.linalg.norm(v, axis=1)
     if back:
@@ -166,7 +172,7 @@ def _range_warp(X: np.ndarray, P: np.ndarray, back: bool = False, near_m: float 
 
 
 def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: int, fill: Optional[np.ndarray] = None,
-              step_m: float = TOP_STEP_M) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+              step_m: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """1.0.5 (Christian, 21 and 22 Nov 2026, Van Zyl: "the same rocks in van zyl have holes"; "Van zyl looks a lot
     better. There are still some holes though"): the viewer's terrain as ONE sheet - the top surface of the mesh
     (V, F), sampled straight down on a grid of ``step_m`` and simplified to ``target`` triangles.
@@ -189,7 +195,7 @@ def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: 
     P, u = np.asarray(pivot, float), _unit(up)
     e1 = _unit(np.cross(u, [1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.cross(u, [0.0, 1.0, 0.0]))
     e2 = np.cross(u, e1)
-    R, g = float(radius_m), float(step_m)
+    R, g = float(radius_m), float(TOP_STEP_M if step_m is None else step_m)
     n = int(2 * R / g) + 1
     ax = -R + g * np.arange(n)
     A, B = np.meshgrid(ax, ax)
@@ -226,16 +232,117 @@ def top_sheet(V: np.ndarray, F: np.ndarray, pivot, up, radius_m: float, target: 
     if float(np.cross(e1, e2) @ u) < 0:                         # the winding's normals up
         Fn = Fn[:, ::-1]
     rec["grid_triangles"] = int(len(Fn))
-    if len(Fn) > int(target):
-        m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(_range_warp(Vn, P, near_m=TOP_NEAR_M, power=TOP_RANGE_POWER)),
-                                      o3d.utility.Vector3iVector(Fn.astype(np.int32)))
-        m = m.simplify_quadric_decimation(target_number_of_triangles=int(target))
-        m.remove_degenerate_triangles()
-        m.remove_unreferenced_vertices()
-        Vn = _range_warp(np.asarray(m.vertices), P, back=True, near_m=TOP_NEAR_M, power=TOP_RANGE_POWER)
-        Fn = np.asarray(m.triangles).astype(np.int64)
+    # the rocks by the rover (Christian, 22 Nov 2026: "Make sure not to simply the rocks in front of the rover too
+    # much"): the grid's own heights where the ground is rough within TOP_ROCKS_TO_M - the simplified sheet is held to
+    # them, with more triangles when it strays
+    rough = (ndi.maximum_filter(np.where(ok, H, -1e4), size=max(3, int(round(0.25 / g)) | 1))
+             - ndi.minimum_filter(np.where(ok, H, 1e4), size=max(3, int(round(0.25 / g)) | 1))) > TOP_ROCK_RELIEF_M
+    rock = ok & rough & (np.hypot(A, B) <= TOP_ROCKS_TO_M)
+    rk = np.flatnonzero(rock.ravel())
+    if len(rk) > 60000:
+        rk = rk[:: len(rk) // 60000 + 1]
+    Vg, Fg, goal = Vn, Fn, int(target)
+    for attempt in range(3):
+        Vn, Fn, rec["passes"] = simplify_in_steps(Vg, Fg, goal, P, u)
+        if not len(rk):
+            break
+        pts2 = P + A.ravel()[rk][:, None] * e1 + B.ravel()[rk][:, None] * e2 + H.ravel()[rk].astype(float)[:, None] * u
+        err = _raycaster(Vn, Fn).compute_distance(o3d.core.Tensor(np.ascontiguousarray(pts2, np.float32))).numpy().astype(float)
+        err = err[np.isfinite(err)]                             # (the distance to the sheet: a wall moved sideways by a
+        #                                                         centimeter is a centimeter off, not its height)
+        if not len(err):
+            break
+        rec["near_rocks"] = {"within_m": TOP_ROCKS_TO_M, "places": int(len(err)), "p95_mm": round(1000 * float(np.percentile(err, 95)), 2),
+                             "p99_mm": round(1000 * float(np.percentile(err, 99)), 2), "max_mm": round(1000 * float(err.max()), 1),
+                             "limit_p95_mm": TOP_ROCK_P95_MM, "triangles": int(len(Fn))}
+        if rec["near_rocks"]["p95_mm"] <= TOP_ROCK_P95_MM or attempt == 2 or len(Fg) <= goal:
+            break
+        goal = int(goal * TOP_ROCK_MORE)
+        log.info("station mesh: the rocks by the rover are %.1f mm off at 95 %% of places (limit %.1f) - simplified again to %d triangles",
+                 rec["near_rocks"]["p95_mm"], TOP_ROCK_P95_MM, goal)
     rec.update(triangles=int(len(Fn)), near_m=TOP_NEAR_M, range_power=TOP_RANGE_POWER)
     return Vn, np.asarray(Fn, np.int64), rec
+
+
+def repair_sheet(V: np.ndarray, F: np.ndarray, pivot, up) -> Tuple[np.ndarray, np.ndarray, Dict[str, int]]:
+    """A simplified sheet put right before it is simplified further: triangles without area, repeated triangles and
+    vertices and edges of more than two triangles are removed; a triangle folded over (its normal turned down) is
+    smoothed out - its corners moved to the mean of their neighbors - and dropped if it stays folded, and the small
+    holes these leave are closed with a fan.  Returns (V, F, counts)."""
+    import open3d as o3d
+    from .mesh import close_small_loops
+    n0 = len(F)
+    m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(np.asarray(V, float)), o3d.utility.Vector3iVector(np.asarray(F, np.int32)))
+    m.remove_degenerate_triangles()
+    m.remove_duplicated_triangles()
+    m.remove_duplicated_vertices()
+    m.remove_non_manifold_edges()
+    V2, F2 = np.asarray(m.vertices).copy(), np.asarray(m.triangles).astype(np.int64)
+    removed = n0 - len(F2)
+    u = _unit(up)
+    fold = (triangle_normals(V2, F2)[0] @ u) <= 0.0
+    folded = int(fold.sum())
+    if folded:                                                   # a fold is first smoothed out: its corners to the
+        from scipy.sparse import coo_matrix                      # mean of their neighbors (a few rounds) ...
+        E = np.concatenate([F2[:, [0, 1]], F2[:, [1, 2]], F2[:, [2, 0]]])
+        nv = np.int64(len(V2))
+        ke = np.unique(np.concatenate([E[:, 0] * nv + E[:, 1], E[:, 1] * nv + E[:, 0]]))      # each neighbor once
+        A = coo_matrix((np.ones(len(ke)), (ke // nv, ke % nv)), shape=(len(V2), len(V2))).tocsr()
+        deg = np.maximum(np.asarray(A.sum(axis=1)).ravel(), 1.0)
+        rim = np.zeros(len(V2), bool)                            # (the sheet's own edge stays where it is)
+        kb, cb = np.unique(np.minimum(E[:, 0], E[:, 1]) * nv + np.maximum(E[:, 0], E[:, 1]), return_counts=True)
+        rim[kb[cb == 1] // nv] = True
+        rim[kb[cb == 1] % nv] = True
+        for _ in range(REPAIR_SMOOTH_ROUNDS):
+            mv = np.unique(F2[fold])
+            mv = mv[~rim[mv]]
+            if not len(mv):
+                break
+            V2[mv] = (A[mv] @ V2) / deg[mv][:, None]
+            fold = (triangle_normals(V2, F2)[0] @ u) <= 0.0
+            if not fold.any():
+                break
+    F2 = F2[~fold]                                               # ... and what is still folded is dropped
+    V3, Fc, loops = close_small_loops(V2, F2, np.asarray(pivot, float), max_edges=REPAIR_LOOP_EDGES, max_diameter_m=REPAIR_LOOP_M)
+    if len(Fc):
+        F2 = np.vstack([F2, Fc])
+    used = np.zeros(len(V3), bool)
+    used[F2.ravel()] = True
+    remap = np.cumsum(used) - 1
+    return V3[used], remap[F2], {"removed": int(removed), "folded": folded, "folds_dropped": int(fold.sum()), "holes_closed": int(loops)}
+
+
+REPAIR_SMOOTH_ROUNDS = 5        # rounds of moving a fold's corners to the mean of their neighbors
+REPAIR_LOOP_EDGES = 60          # a hole the repair closes: at most this many edges ...
+REPAIR_LOOP_M = 0.5             # ... and this wide (x (1 + range / 10 m))
+SIMPLIFY_STEP = 0.5             # 1.0.5: each pass keeps this share of the triangles, then the sheet is repaired
+
+
+def simplify_in_steps(V: np.ndarray, F: np.ndarray, target: int, pivot, up, step: float = SIMPLIFY_STEP
+                      ) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, int]]]:
+    """1.0.5 (Christian, 22 Nov 2026: "The simplification should simplify iteratively, reducing polygon count by ~50%
+    repairing the mesh, then repeat until target poly count is met"): the sheet (V, F) simplified to ``target``
+    triangles in passes that each keep ``step`` of the triangles (the last one what is left to the target); after
+    every pass the sheet is repaired (:func:`repair_sheet`), so a fold or a hole is put right while it is one triangle
+    and is not built upon.  Each pass works in the space scaled by the range (:func:`_range_warp`).  Returns
+    (V, F, one record per pass)."""
+    import open3d as o3d
+    P = np.asarray(pivot, float)
+    V, F = np.asarray(V, float), np.asarray(F, np.int64)
+    passes: List[Dict[str, int]] = []
+    target = int(target)
+    while len(F) > target and len(passes) < 16:
+        goal = int(len(F) * float(step))
+        if goal <= target:                                       # the last pass: room for the repair's fans
+            goal = int(target * (0.99 if not passes or passes[-1]["from"] > target * 1.02 else 0.97))
+        m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(_range_warp(V, P)), o3d.utility.Vector3iVector(F.astype(np.int32)))
+        m = m.simplify_quadric_decimation(target_number_of_triangles=max(goal, 4))
+        n_in = len(F)
+        V, F, fix = repair_sheet(_range_warp(np.asarray(m.vertices), P, back=True), np.asarray(m.triangles), P, up)
+        passes.append(dict({"from": int(n_in), "to": int(len(F))}, **fix))
+        if len(F) >= n_in:                                       # nothing went: no further pass would do better
+            break
+    return V, F, passes
 
 
 def terrain_mesh(scene, pivot, up, radius_m: float = RADIUS_M, target: int = TARGET_TRIANGLES) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
@@ -824,8 +931,9 @@ def grown_vertex_colors(F: np.ndarray, vis: np.ndarray, color: np.ndarray, defau
         return out
     idx = np.full(n, -1, np.int64)
     idx[free] = np.arange(len(free))
-    E = np.concatenate([Fh[:, [0, 1]], Fh[:, [1, 2]], Fh[:, [2, 0]]])
-    E = np.unique(np.concatenate([E, E[:, ::-1]]), axis=0)
+    E = np.concatenate([Fh[:, [0, 1]], Fh[:, [1, 2]], Fh[:, [2, 0]]]).astype(np.int64)
+    ke = np.unique(np.concatenate([E[:, 0] * np.int64(n) + E[:, 1], E[:, 1] * np.int64(n) + E[:, 0]]))    # each neighbor once
+    E = np.stack([ke // n, ke % n], axis=1)
     E = E[idx[E[:, 0]] >= 0]
     to_free = idx[E[:, 1]] >= 0
     m = len(free)
