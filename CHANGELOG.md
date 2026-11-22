@@ -20,6 +20,8 @@ The development history before 1.0 is in
   The list stays with the run (a restart at logon keeps it; `--zcam-sites all` ends it).  For the 21 Nov restart of
   freeze 3: Seitah Overlook, Issole / Seitah South and the four other blocks the Sun-distance term brightens by 16 %
   or more (Belva, Rochette, Chal Rocks large, South Arm).
+- Viewer: full 3D is the default terrain mode (a station opens in it where it has it, until the visitor chooses
+  another); the welcome view shows Van Zyl's own pictures, not muted copies, and opens in the original (raw) color.
 - Freeze: the blocks' own mask checkpoint file is passed to every site run (`Run.mask_set`).  A run whose chosen
   model was that same file recorded no setting, and on 1.0.1 the site runs took the default registry name
   `rpp_mask_v5`, which was not on the computer: every block of the 21 Nov restart failed within a minute.

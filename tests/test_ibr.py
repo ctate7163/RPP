@@ -3167,21 +3167,17 @@ def test_welcome_picture_keeps_its_color_and_the_map_gets_an_orthomosaic(tmp_pat
     cv2.imwrite(str(w / "panos" / "S_360_3DTD.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 98])
     (w / "panos" / f"{web.WELCOME_ID}{web.STACK}").write_bytes(b"old gray one")
     e = web.welcome_pano(w, {"variants": [{"views": {"standard": "panos/S_360_3DTD.jpg"}}]})
-    f = w / e["variants"][0]["views"]["standard"]
-    m = cv2.imread(str(f)).reshape(-1, 3).mean(axis=0)
-    assert "muted" in f.name and not (w / "panos" / f"{web.WELCOME_ID}{web.STACK}").exists()
-    assert m[2] - m[0] > 60 and (m[2] - m[0]) < 0.75 * 160                    # still orange, less so
-    # 0.99.38 (Christian, 19 Nov 2026: "the welcome screen should now have the same color products as Van zyl"): every
-    # view of the terrain-only variant, muted; a view without its picture here keeps the one made before
-    cv2.imwrite(str(w / "panos" / "S_dcs_360_3DTD.jpg"), img)
+    # 1.0.1 (Christian, 21 Nov 2026: "remove the gray tone of the welcome screen version of vanzyl. Instead, use the Raw
+    # color as the first skin"): Van Zyl's own pictures - no muted copy, the copies of before removed, raw color first
+    assert e["variants"][0]["views"] == {"standard": "panos/S_360_3DTD.jpg"}
+    assert not (w / "panos" / f"{web.WELCOME_ID}{web.STACK}").exists()
+    (w / "panos" / f"{web.WELCOME_ID}_muted{web.STACK}").write_bytes(b"the muted one of 1.0")
     vz = {"variants": [{"key": "rover", "views": {"standard": "panos/R_360_3DTD.jpg"}},
-                       {"key": "masked", "views": {"standard": "panos/S_360_3DTD.jpg", "dcs color": "panos/S_dcs_360_3DTD.jpg",
-                                                   "normal map": "panos/S_normal_360_3DTD.jpg"}}]}
-    e2 = web.welcome_pano(w, vz)
-    assert e2["variants"][0]["views"] == {"standard": f"panos/{web.WELCOME_ID}_muted{web.STACK}",
-                                          "dcs color": f"panos/{web.WELCOME_ID}_dcs_color_muted{web.STACK}"}
-    (w / "panos" / "S_dcs_360_3DTD.jpg").unlink()
-    assert "dcs color" in web.welcome_pano(w, vz)["variants"][0]["views"]     # made before: kept
+                       {"key": "masked", "views": {"standard": "panos/S_360_3DTD.jpg", "raw color": "https://x/S_raw_360_3DTD.jpg",
+                                                   "dcs color": "panos/S_dcs_360_3DTD.jpg"}}]}
+    v2 = web.welcome_pano(w, vz)["variants"][0]["views"]
+    assert list(v2) == ["raw color", "standard", "dcs color"] and v2["raw color"] == "https://x/S_raw_360_3DTD.jpg"
+    assert not list((w / "panos").glob("welcome*")) and (w / "panos" / "S_360_3DTD.jpg").is_file()
     # the map's picture
     rasterio = pytest.importorskip("rasterio")
     pytest.importorskip("pyproj")

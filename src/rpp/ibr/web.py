@@ -198,6 +198,7 @@ def station_mesh(folder: Path, web: Path, pano_dir: Optional[Path] = None) -> Op
 WELCOME_ID = "welcome"
 WELCOME_STATION = "Sol0052"                # Van Zyl Overlook (1.0: the sol alone; Sol0052_S003D2046 before)
 WELCOME_WIDTH = 4096
+WELCOME_FIRST_VIEW = "raw color"           # 1.0.1: the welcome view opens in Van Zyl's original color, not muted
 WELCOME_MUTE = (0.60, 0.85, 0.08)          # the welcome picture (0.98.14; Christian, 15 Nov 2026: "the welcome screen should
 #                                            have color, just be a little more muted than the true van zyl ods"): the colors'
 #                                            distance from gray x the first, then x the second + the third x white
@@ -225,39 +226,14 @@ def welcome_pano(web: Path, station_entry: Optional[Dict[str, Any]], pano_dir: O
         next((v for v in vs if v.get("views", {}).get("standard")), None)
     if var is None:
         return None
-    old = web / "panos" / f"{WELCOME_ID}{STACK}"                 # the gray one of before 0.98.14
-    if old.is_file():
-        old.unlink()
-    views: Dict[str, str] = {}
-    for name, rel in var["views"].items():
-        rel = str(rel)
-        tag = "" if name == "standard" else "_" + re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-        dst = web / "panos" / f"{WELCOME_ID}{tag}_muted{STACK}"
-        src = web / rel
-        if pano_dir is not None and rel.startswith("panos/") and (Path(pano_dir) / rel[6:]).is_file():
-            src = Path(pano_dir) / rel[6:]                       # 0.99.3: this run's picture, in the Hugging Face stage
-        if not src.is_file():                                    # 0.99.3: Van Zyl's pictures are on Hugging Face (a URL):
-            if dst.is_file():                                    # the welcome picture made before stays
-                views[name] = "panos/" + dst.name
-            continue
-        if not (dst.is_file() and dst.stat().st_mtime >= src.stat().st_mtime):
-            img = cv2.imread(str(src), cv2.IMREAD_COLOR)
-            if img is None:
-                continue
-            if img.shape[1] > WELCOME_WIDTH:
-                img = cv2.resize(img, (WELCOME_WIDTH, WELCOME_WIDTH), interpolation=cv2.INTER_AREA)
-            g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)[..., None]
-            sat, gain, lift = WELCOME_MUTE
-            m = np.clip(gain * (g + sat * (img.astype(np.float32) - g)) + lift * 255.0, 0, 255).astype(np.uint8)
-            cv2.imwrite(str(dst), m, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            try:
-                from .xmp import tag_stereo
-                tag_stereo(dst, extra={"Station": WELCOME_STATION})
-            except Exception:                                    # noqa: BLE001
-                pass
-        views[name] = "panos/" + dst.name
-    if "standard" not in views:
-        return None
+    # 1.0.1 (Christian, 21 Nov 2026: "remove the gray tone of the welcome screen version of vanzyl. Instead, use the Raw
+    # color as the first skin"): Van Zyl's own pictures, not muted copies (0.98.4 gray, 0.98.14-1.0 muted colors); the
+    # raw ("original") color first, so the welcome view opens in it.  The copies of before are removed
+    for f in (web / "panos").glob(f"{WELCOME_ID}*{STACK}") if (web / "panos").is_dir() else ():
+        f.unlink()
+    views = {k: str(v) for k, v in var["views"].items()}
+    if WELCOME_FIRST_VIEW in views:
+        views = {WELCOME_FIRST_VIEW: views[WELCOME_FIRST_VIEW], **{k: v for k, v in views.items() if k != WELCOME_FIRST_VIEW}}
     return _welcome_entry(views)
 
 

@@ -637,11 +637,12 @@ def station_done(run: Dict[str, Any]) -> bool:
             return False
         if rec.get("code") != _CODE_NOW():                 # 0.99.51 (Christian, 20 Nov 2026: "every site gets remade
             return False                                   # from the fusion up if it wasn't generated on the same code")
-        try:                                               # 1.0.1: nor on another alignment or other brightness
-            if rec.get("block") != block_stamp(run["work"]):
+        if rec.get("block") and run.get("work"):           # 1.0.1: nor on another alignment or other brightness (a
+            try:                                           # record of 1.0.1 has the block's stamp; one of before has
+                if rec["block"] != block_stamp(run["work"]):   # another code key and is not done anyway)
+                    return False
+            except Exception:                              # noqa: BLE001 - the block cannot be read: not done
                 return False
-        except Exception:                                  # noqa: BLE001 - then the steps' own keys decide
-            return False
     return True
 
 
