@@ -166,3 +166,43 @@ def test_page_only_puts_the_viewer_page_up_and_touches_no_station(tmp_path, monk
     assert rpp_main(["single-sites", "--page-only", "--publish", str(d), "--no-upload"]) == 0 and not calls
     monkeypatch.setattr(web, "upload", lambda d, stations=(), **kw: {"ok": False, "message": "no network"})
     assert rpp_main(["single-sites", "--page-only", "--publish", str(d)]) == 1
+
+
+def test_check_done_says_whether_the_run_would_make_anything(tmp_path, monkeypatch):
+    """1.0.5: single-sites --check-done - nothing run; exit 0 when every station of the run is made as these arguments
+    would make it (the batch file runs Van Zyl again from its own frames only when the regular terrain did not make
+    it, not when only its upload failed)."""
+    from rpp.cli import main as rpp_main
+    work = tmp_path / "mars2020_sol_0015_van_zyl_overlook_huge"
+    (work / "colmap").mkdir(parents=True)
+    (work / "colmap" / "project.json").write_text('{"images": []}')
+    (work / "colmap" / "run_done.json").write_text("{}")
+    cfgf = tmp_path / "cfg.json"
+    cfgf.write_text(json.dumps({"stations": {"Sol0052": {"station": "3_2046", "work": str(work)}}, "variants": ["rover", "masked"],
+                                "terrain": "block"}))
+    monkeypatch.setattr(SS, "_run", lambda argv, fh: 1)          # nothing would be run: a call would fail the test
+    args = ["single-sites", "Sol0052", "--config", str(cfgf), "--root", str(tmp_path), "--any-block", "--block-cameras", "NF",
+            "--terrain", "regular", "--no-zcam"]
+    assert rpp_main(args + ["--check-done"]) == 1
+    ran = []
+
+    def fake(argv, fh):
+        ran.append(argv)
+        if argv[0] in SS.STEP_OUTPUT:
+            out = Path(argv[argv.index("--out") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / SS.STEP_OUTPUT[argv[0]]).write_text("{}")
+            if argv[0] == "ods" and "--station-mesh" in argv:
+                from rpp.ibr import station_mesh as SM
+                for kind in (("rover",) if "--rover" in argv else ("scape", "terrain")):
+                    (out / f"Sol0052_{SM.PART[kind]}.json").write_text(json.dumps({"model_code": SM.model_code()}))
+        if argv[0] == "dense":
+            ws = work / "colmap" / "dense_block_van_zyl_overlook_FN"
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "fused.ply").write_bytes(b"x")
+        return 0
+    monkeypatch.setattr(SS, "_run", fake)
+    assert rpp_main(args + ["--no-upload"]) == 0 and ran
+    monkeypatch.setattr(SS, "_run", lambda argv, fh: 1)
+    assert rpp_main(args + ["--check-done"]) == 0                 # made, with the CLI's own defaults (the rover surface's eyes, the model)
+    assert rpp_main(args[:-2] + ["block", "--no-zcam", "--check-done"]) == 1    # the whole block's cloud: not made

@@ -1350,6 +1350,9 @@ window.addEventListener('keyup', e => {
     bKey = null;
   }
 });
+window.addEventListener('blur', () => {         // the page lost the keyboard with B down: no keyup will come
+  if (bKey) { clearTimeout(bKey.timer); bKey = null; }
+});
 
 // ---------------------------------------------------------------- looking around on a screen
 let yaw = 0, pitch = 0, drag = null;

@@ -61,6 +61,10 @@ The full 3D model only; meshes, depth maps and panoramas are those of 1.0.4.
   surface or the sky is always kept (the far surface 105 m overhead left a wedge of the zenith without sky).
   Directions with nothing drawn, seen from the mast (2.88 million): Skinner Ridge 32,637 to 30, Wildcat Ridge 4,699
   to 18 (the rest are cracks of the 1.0.4 terrain, which the one sheet does not have).
+  Where a floater is taken out of the terrain (below) the shell follows a ray past it to what the terrain draws or,
+  beyond the terrain's 20 m, to the surface out there (`horizon_shell(near=...)`): before, the shell left that
+  direction to the near terrain, which no longer drew anything there (Wildcat Ridge: 4,026 directions black where the
+  floater was; Rockytop Sol0461: 735; now none, from the mast or 0.5 m off it).
 - **A floater is not taken into the terrain** (`under_floaters`; Wildcat Ridge: "a bad floater attached to the ground
   in front of the rover" - a sheet 5.4 m long, 2 m over the slope, on a thin post; Rockytop has one 17 m out).  The
   top surface is lowered to the surface beneath where it floats (0.4 m of air or more under 0.6 m of mesh or less),
@@ -73,6 +77,14 @@ The full 3D model only; meshes, depth maps and panoramas are those of 1.0.4.
   the ridge; the texture took the panorama's pixels.  Now: one color per degree of elevation (the median over the
   azimuths without empty and outlying pixels), and along the skyline's circle the panorama's own color in each
   direction, fading into it over 12 deg.  The panoramas themselves are not changed (see "Not in this version").
+- **The rover is textured wherever the station's Navcam frames see it** (the rover model had more gray surfaces than
+  it should).  A triangle was textured when it could be seen from within 1 m of the pivot; now also when a frame
+  of the station sees it (in the frame, nothing of the mesh between).  And a texel no frame colored - the frames' rover
+  masks miss thin parts and edges (struts, a wheel's rim, the arm), and a pixel the mask calls terrain may not color
+  the model - is colored in a second pass by the station's own Navcam frames without the masks
+  (`ROVER_UNMASKED_PASS`; context frames still never color the rover).  The record says how many triangles each way
+  and how many texels the second pass colored.  Sol0461 on 1.0.4: 55 % of the rover's area textured and 77 % of those
+  texels colored by a frame - the rest was gray.
 - **`single-sites --terrain regular`**: the block's terrain as with `block`, but of a LARGE or HUGE block only a part,
   so that fewer depth maps are made - the alignment is the large block's.  The part: the frames of the sols of the
   regular block of the same place (`van_zyl_overlook`, sols 49-71, for a station of `van_zyl_overlook_huge`: 4 of its
@@ -80,6 +92,9 @@ The full 3D model only; meshes, depth maps and panoramas are those of 1.0.4.
   station is not of its sols) the frames of the stations within 30 m of it; and always its own.  The cloud is
   `colmap/dense_block_<name>_<families>`.  `rpp dense --block-images` takes patterns (`???_0052_*`).  A station
   made before with the whole block's cloud is made again (its commands differ).
+- `single-sites --check-done`: nothing run - exit 0 when every station of the run is made as these arguments would
+  make it (every step after the cloud with these commands, the full 3D model of this code), else 1.  The batch file
+  runs Van Zyl from its own frames only when the regular terrain did not make it - not when only its upload failed.
 - Not in this version: the mesh's own cracks (`mesh.ply` is as 1.0.4 makes it; the panoramas, rendered from the mast,
   do not show them), the white disc at the base of the rock at Van Zyl (in the panorama itself; origin not found),
   the patches in the panoramas' own sky (the red one of Sol0461; they are in the ODS images, not only the model), and

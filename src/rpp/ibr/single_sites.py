@@ -751,6 +751,39 @@ def station_done(run: Dict[str, Any]) -> bool:
     return True
 
 
+def steps_made(run: Dict[str, Any]) -> bool:
+    """1.0.5: True when every step of this planned station after the cloud ran with exactly these commands (the keys
+    :func:`run_all` would give them: the command, the code, the step before, the cloud's file, the block's stamp) and
+    ended well, and the full 3D model is of this code - stricter than :func:`station_done`, which asks only for a
+    panorama of this code (whatever the terrain it was made from)."""
+    if not station_done(run):
+        return False
+    base, work_ = Path(run["out"]), Path(run["work"])
+    code = code_key()
+    stamp = block_stamp(work_)
+    keys: Dict[str, str] = {}
+    ods_keys: List[str] = []
+    for c in run["commands"]:
+        v, step = c["variant"], c["step"]
+        if step == "dense":
+            continue
+        vout = base / ("with_rover" if v == "rover" else "")
+        clouds = sorted((work_ / "colmap").glob(f"dense_{run.get('code') or station_key(run['label'])}*/fused.ply")) if step == "mesh" else []
+        if step == "mesh" and "--points" in c["argv"]:
+            clouds = [Path(c["argv"][c["argv"].index("--points") + 1])]
+        tf = c["argv"][c["argv"].index("--terrain-from") + 1] if "--terrain-from" in c["argv"] else None
+        before = keys.get(v, "") + (json.dumps(_read(step_record(tf, "mesh")).get("key")) if tf else "")
+        if step == "ods":
+            before += "".join(ods_keys)
+        key = step_key(c["argv"], before, code, clouds, block=stamp)
+        keys[v] = key
+        if step == "ods":
+            ods_keys.append(key)
+        if not step_done(vout, step, key):
+            return False
+    return True
+
+
 def _wants_model(run: Dict[str, Any], variant: str) -> bool:
     return any(c["step"] == "ods" and c["variant"] == variant and "--station-mesh" in c["argv"] for c in run.get("commands", []))
 
@@ -1249,6 +1282,8 @@ def add_parser(sub) -> None:
     p.add_argument("--poll-min", type=float, default=15.0, help="--wait-for-blocks: minutes between looks (default 15)")
     p.add_argument("--any-block", action="store_true",
                    help="run stations whose block has not finished its alignment too (default: skipped)")
+    p.add_argument("--check-done", action="store_true", help="1.0.5: nothing run - exit 0 when every station of the run "
+                   "is made as these arguments would make it (its steps and its full 3D model up to date), else 1")
     p.add_argument("--list", action="store_true", help="the stations of the config")
     p.add_argument("--dry-run", action="store_true", help="the commands, not run")
     p.add_argument("--install", metavar="DIR", default=None, help=f"write {BAT_NAME} (and make_square.bat) into DIR and stop")
@@ -1392,6 +1427,10 @@ def _single_sites_pass(a: argparse.Namespace) -> int:
                 rover_surface=getattr(a, "rover_surface", False),
                 station_mesh="only" if getattr(a, "station_mesh_only", False) else getattr(a, "station_mesh", False),
                 companions=pairs, block_cameras=getattr(a, "block_cameras", None), terrain=getattr(a, "terrain", None))
+    if getattr(a, "check_done", False):                          # 1.0.5: made? (for a batch file)
+        left = [r["label"] for r in runs if not steps_made(r)]
+        print(f"single-sites --check-done: {len(runs) - len(left)} of {len(runs)} made" + (f"; not: {', '.join(left)}" if left else ""))
+        return 0 if not left else 1
     if getattr(a, "recolor", False):                            # 0.99.50: the stations made in the output root
         gone = [r for r in runs if not has_16bit(r)]
         runs = [r for r in runs if r not in gone]

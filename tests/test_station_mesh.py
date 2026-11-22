@@ -1323,3 +1323,34 @@ def test_a_floater_on_a_post_is_lowered_and_a_ledge_and_a_boulders_overhang_stay
     V0, F0, rec0 = SM.top_sheet(V, F, P, up, 11.5, 60000, step_m=0.05)
     rc = SM._raycaster(V0, F0)
     assert "floaters" not in rec0 and height(5.0, 0.0) > 1.4
+
+
+def test_the_rover_is_textured_where_the_frames_see_it_even_where_their_masks_miss_it(tmp_path, monkeypatch):
+    """1.0.5 (Christian, 22 Nov 2026: the rover model has more gray surfaces than it should - "Texture every surface
+    that the ncams see"): a rover triangle a frame of the station sees is textured even when no viewpoint within 1 m
+    sees it, and a texel the frames see but whose rover masks call it terrain (a strut, a rim the mask misses) is
+    colored in a second pass without the masks - not left gray."""
+    from rpp.ibr import ods as O, station_mesh as SM
+    proj, rec, st, sc = _scene(tmp_path)
+    src = O.station_sources(proj, rec, st, scale=1.0)
+    base = SM.rover_part(sc, src, st, size=256)["record"]
+    assert base["frames"] == len(src) and base["seen_by_frames"] > 0
+    for s in src:                                       # masks that see no rover anywhere
+        s.model_rover = np.zeros((s.H, s.W), bool)
+    monkeypatch.setattr(SM, "ROVER_UNMASKED_PASS", False)
+    r0 = SM.rover_part(sc, src, st, size=256)["record"]
+    monkeypatch.setattr(SM, "ROVER_UNMASKED_PASS", True)
+    r1 = SM.rover_part(sc, src, st, size=256)["record"]
+    assert r0["texels_colored_without_rover_mask"] == 0 and r0["texels_colored"] < 0.5 * base["texels_colored"]
+    assert r1["texels_colored_without_rover_mask"] > 0 and r1["texels_colored"] > r0["texels_colored"] + 0.1
+    assert O.SURFACE_CHECK is True                     # (the second pass leaves the panoramas' check as it was)
+    for s in src:
+        s.model_rover = None
+    s0 = src[0]
+    s0.context = True                                   # a frame of another place never colors the rover
+    assert SM.rover_sources(src, "N") == src[1:]
+    s0.context = False
+    # viewpoints that see nothing (50 m under the ground): what is textured is what the frames see
+    monkeypatch.setattr(SM, "viewpoints", lambda pivot, *a, **k: np.asarray(pivot, float)[None] + [[0.0, 0.0, -50.0]])
+    r2 = SM.rover_part(sc, src, st, size=256)["record"]
+    assert r2["textured_triangles"] == r2["seen_by_frames"] == r2["seen_by_frames_only"] > 0

@@ -124,6 +124,7 @@ SKY_WHITE = True                # 0.99.41 (Christian, 19 Nov 2026: "the sky stil
 #                                 joined to the zenith - not the hills beyond the mesh) and the texels no triangle
 #                                 uses are white
 POLE_WHITE_EL_DEG = 60.0        # 0.99.52: the fifth mode's texture is sky white above this elevation (no hill rises so high)
+SHELL_NEAR_TOL_M = 0.25         # 1.0.5: the scene this much nearer than the drawn terrain along a ray is not the terrain
 SHELL_FROM_M = 17.0             # the shell starts this far from the mast axis (the near mesh fades out over FADE_M; 7 m
 #                                 until 0.99.39)
 FADE_M = (18.0, 20.0)           # the near terrain's opacity: 1 at the first, 0 at the second (horizontal m from the axis;
@@ -250,8 +251,12 @@ def under_floaters(rc, base: np.ndarray, h: np.ndarray, hit: np.ndarray, inside:
     Sn = np.zeros(inside.shape, bool)
     Sn[inside] = seen
     have = H > -5e3
+
+    def opening(Z, k):                                          # an opening (gray level) that leaves the grid's edge alone: no
+        er = ndi.grey_erosion(np.where(have, Z, 1e4), size=(k, k))     # cell outside the disc pulls the ground down
+        return ndi.grey_dilation(np.where(have, er, -1e4), size=(k, k))
     kb = max(3, int(round(TOP_FLOATER_BROAD_M / g)) | 1)
-    Hop = ndi.grey_opening(np.where(have, H, -1e4), size=(kb, kb))   # the ground without what is narrower than "broad"
+    Hop = opening(H, kb)                                        # the ground without what is narrower than "broad"
     lab, k = ndi.label(M, structure=np.ones((3, 3), bool))
     sizes = np.bincount(lab.ravel(), minlength=k + 1)
     least = max(2, int(np.ceil(TOP_FLOATER_MIN_M2 / (g * g))))
@@ -294,8 +299,8 @@ def under_floaters(rc, base: np.ndarray, h: np.ndarray, hit: np.ndarray, inside:
     posts = np.zeros(inside.shape, bool)
     for width_m, tall_m in TOP_POSTS:                           # the narrowest first: a thin post, then a pillar
         ks = max(3, int(round(width_m / g)) | 1)
-        Ho = ndi.grey_opening(np.where(have, H2, 1e4), size=(ks, ks))
-        post = near & (Ho < 5e3) & (H2 - Ho > tall_m)
+        Ho = opening(H2, ks)
+        post = near & (Ho > -5e3) & (H2 - Ho > tall_m)
         H2 = np.where(post, Ho, H2)
         posts |= post
     took.sort(key=lambda r: -r["m2"])
@@ -795,8 +800,19 @@ def texture_rows(scene, sources: Sequence[Any], args: Dict[str, Any], r0: int, r
         o, d = np.concatenate(O).astype(float), np.concatenate(D).astype(float)
         fam = args.get("families")
         srcs = [s for s in sources if s.name[:1] in fam] if fam else list(sources)
+        fallback = bool(args.get("rover_fallback"))
+        if fallback:                                             # 1.0.5: the station's own frames only (see rover_part)
+            srcs = [s for s in srcs if not (getattr(s, "context", False) or getattr(s, "no_rover", False)
+                                            or getattr(s, "fill_only", False))]
         if len(idx) and srcs:
-            res = shade_rays(scene, srcs, o, d, up=args.get("up", (0, 0, 1)), linear=linear)
+            from . import ods as _ods
+            keep_check = _ods.SURFACE_CHECK
+            try:
+                if fallback:                                     # ... without the rover mask's say
+                    _ods.SURFACE_CHECK = False
+                res = shade_rays(scene, srcs, o, d, up=args.get("up", (0, 0, 1)), linear=linear)
+            finally:
+                _ods.SURFACE_CHECK = keep_check
             for k in BAND_FIELDS:
                 band[k][idx] = res[k]
             band["rejected"] = res["rejected"]
@@ -961,7 +977,7 @@ def sky_model(pano: np.ndarray, circle_el_deg: float) -> np.ndarray:
       ``SKY_MODEL_FADE_DEG`` above it."""
     import cv2
     from scipy import ndimage as ndi
-    P = np.asarray(pano, np.float32)[..., :3]
+    P = np.ascontiguousarray(np.asarray(pano, np.float32)[..., :3])
     small = cv2.resize(P, (360, 180), interpolation=cv2.INTER_AREA).astype(np.float64)
     lum = small.sum(axis=2)
     ec = int(np.clip(round(90.0 - float(circle_el_deg)), 2, 178))        # the circle's row (row 0: the zenith)
@@ -1402,7 +1418,7 @@ def fill_charts(rgb: np.ndarray, have: np.ndarray, cells: Dict[str, Any], defaul
 # ------------------------------------------------------------------------------------------- to the horizon (0.99.32)
 def horizon_shell(scene, C, pivot, up, north, east, from_m: float = SHELL_FROM_M, az_step_deg: float = SHELL_AZ_STEP_DEG,
                   step_deg: float = SHELL_STEP_DEG, sky_rings: int = SHELL_SKY_RINGS, dome_m: float = DOME_M,
-                  margin_deg: float = SKYLINE_MARGIN_DEG) -> Dict[str, Any]:
+                  margin_deg: float = SKYLINE_MARGIN_DEG, near=None) -> Dict[str, Any]:
     """The surface seen from C beyond the near terrain, as one sheet: on rings of equal angle from straight down, a
     vertex per ``az_step_deg`` where its ray from C meets the scene (the mesh, the ground plane, the far surface -
     the sky sphere or the far field, which also carries the sky) or, where it meets nothing, at ``dome_m``.  The
@@ -1410,17 +1426,41 @@ def horizon_shell(scene, C, pivot, up, north, east, from_m: float = SHELL_FROM_M
     or the plane plus ``margin_deg``, at least ``SKYLINE_MIN_DEG`` above the horizontal) every ``step_deg``, then
     ``sky_rings`` more to the zenith.  Seen from C the sheet has no fold; its parallax for a head off C is the true one out to the far
     field and none on the sky.  Returns {"V" (n, 3), "F" (m, 3) - the outer rings first, so a viewer that draws them
-    in order without a depth buffer draws the near ones over the far ones -, "knee" rad, "theta0" rad, "rings", "az"}."""
-    from .raycast import LABEL_FAR, LABEL_NONE, SKY_RANGE_M
+    in order without a depth buffer draws the near ones over the far ones -, "knee" rad, "theta0" rad, "rings", "az"}.
+
+    ``near`` (1.0.5) = (a raycaster of the near terrain AS IT IS DRAWN, its radius about the mast axis): the scene's
+    mesh can hold what the drawn terrain does not - a floater that :func:`under_floaters` took out (Wildcat Ridge:
+    a sheet 6 m out at the mast's height).  A ray that met it was "near terrain" to the shell, the terrain drew
+    nothing there, and the place was black.  With ``near`` a ray is followed to what IS drawn: where it meets the
+    scene before the drawn terrain (by more than ``SHELL_NEAR_TOL_M``) the vertex is on the drawn terrain; where it
+    meets the scene inside the radius and never the drawn terrain, it is cast again from where it leaves the radius."""
+    from .raycast import LABEL_FAR, LABEL_MESH, LABEL_NONE, SKY_RANGE_M
     C, up, north, east = np.asarray(C, float), _unit(up), _unit(north), _unit(east)
 
     def cast(th, ph):
         s = np.sin(th)
         d = np.cos(th)[:, None] * -up + (s * np.sin(ph))[:, None] * east + (s * np.cos(ph))[:, None] * north
-        h = scene.cast(np.broadcast_to(C, d.shape).copy(), d)
-        t = np.asarray(h["t"], float)
-        open_ = (h["label"] == LABEL_NONE) | ~np.isfinite(t) | (t >= dome_m)       # nothing there: the dome
-        return d, np.where(open_, dome_m, t), open_ | (h["label"] == LABEL_FAR)   # ..., beyond the mesh and the plane
+        o = np.broadcast_to(C, d.shape).copy()
+        h = scene.cast(o, d)
+        t = np.asarray(h["t"], float).copy()
+        label = np.asarray(h["label"]).copy()
+        if near is not None:                                     # 1.0.5: to what the near terrain draws, or past it
+            rc_t, rad = near[0], float(near[1])
+            tt, _ = _cast(rc_t, o, d)
+            hit = np.isfinite(t) & (label != LABEL_NONE)
+            inside = hit & (t * s < rad - 1e-3)                  # (s: the ray's horizontal share - C is on the mast axis)
+            before = inside & np.isfinite(tt) & (t < tt - SHELL_NEAR_TOL_M)
+            t[before] = tt[before]
+            label[before] = LABEL_MESH
+            past = inside & ~np.isfinite(tt)
+            if past.any():
+                out_at = rad / np.maximum(s[past], 1e-9) + 0.01
+                h2 = scene.cast(C + d[past] * out_at[:, None], d[past])
+                t2 = np.asarray(h2["t"], float)
+                t[past] = np.where(np.isfinite(t2), out_at + t2, np.inf)
+                label[past] = np.asarray(h2["label"])
+        open_ = (label == LABEL_NONE) | ~np.isfinite(t) | (t >= dome_m)             # nothing there: the dome
+        return d, np.where(open_, dome_m, t), open_ | (label == LABEL_FAR)         # ..., beyond the mesh and the plane
     _, t_down, _ = cast(np.zeros(1), np.zeros(1))
     h_c = float(t_down[0]) if t_down[0] < dome_m else 2.5
     th0 = max(np.radians(20.0), float(np.arctan2(from_m, h_c)) - np.radians(3.0))
@@ -1611,7 +1651,7 @@ def terrain_part(scene, sources, station, pool=None, size: int = TEXTURE_PX, rad
     theta_max = float(min(np.pi * 0.995, th.max() + np.radians(0.5)))
     shell = knee = None
     if full:
-        shell = horizon_shell(scene, C, P, up, north, east)
+        shell = horizon_shell(scene, C, P, up, north, east, near=(rc, float(radius_m)))
         knee = (max(shell["knee"], theta_max), HORIZON_FRAC)
         theta_max = float(np.pi)
     rpx = size / 2.0 - GUTTER_PX - 2
@@ -1748,6 +1788,16 @@ def rover_families(sources) -> str:
     return ROVER_FAMILIES + "".join(f for f in own if f not in ROVER_FAMILIES and f != "F" and f != "R")
 
 
+ROVER_UNMASKED_PASS = True      # 1.0.5: the rover's texels no frame colored, colored again without the rover masks
+
+
+def rover_sources(sources, families: str) -> List[Any]:
+    """1.0.5: the frames that may color the rover model: of ``families``, the station's own (not a context frame,
+    not a fill-only one, not one marked ``no_rover``)."""
+    return [s for s in sources if s.name[:1] in families and not (getattr(s, "context", False)
+            or getattr(s, "no_rover", False) or getattr(s, "fill_only", False))]
+
+
 def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX, view_radius_m: float = VIEW_RADIUS_M,
                families: Optional[str] = None, linear: bool = False, rows_per_chunk: int = 128) -> Dict[str, Any]:
     """The rover model and its texture (see the module): {"V", "F", "uv", "texture", "record"}.  ``families``: the
@@ -1783,6 +1833,23 @@ def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX,
             s = seen_from(rc_all, pts[:, j], vp)
             side[s] += np.sign(((vp - pts[s, j]) * nrm[s]).sum(1))
             seen |= s
+    # 1.0.5 (Christian, 22 Nov 2026: the rover model has more gray surfaces than it should - "Texture every
+    # surface that the ncams see"): a triangle a frame of the station sees - in the frame, nothing of the mesh
+    # between - is textured too, wherever the viewer may stand
+    seen_vp = seen.copy()
+    cam_srcs = rover_sources(sources, families)
+    cam = np.zeros(len(F), bool)
+    for src in cam_srcs:
+        for j in range(pts.shape[1]):
+            _, z, inside = src.project(pts[:, j])
+            q = np.flatnonzero(inside)
+            if not len(q):
+                continue
+            v = seen_from(rc_all, pts[q, j], src.C)
+            q = q[v]
+            cam[q] = True
+            side[q] += np.sign(((src.C - pts[q, j]) * nrm[q]).sum(1))
+    seen = seen_vp | cam
     k = np.flatnonzero(seen)
     nk = nrm[k] * np.where(side[k] < 0, -1.0, 1.0)[:, None]    # the side that is seen
     gw, gh = GRAY_STRIP
@@ -1791,6 +1858,23 @@ def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX,
             "all_cells": cells, "normals": nk}
     tex = render_texture(scene, sources, args, pool, rows_per_chunk)
     rgb, have = np.asarray(tex.pop("rgb"), np.float32), tex.pop("source") >= 0
+    tex = None
+    # 1.0.5: a texel of a triangle a frame sees that no frame colored - the frames' rover masks miss the thin parts
+    # and the edges (a strut, a wheel's rim, the arm), and a pixel the mask calls terrain may not color the model -
+    # is colored again by the station's own frames without that check (ROVER_UNMASKED_PASS)
+    second = 0
+    tm = cells.get("tri_map")
+    if ROVER_UNMASKED_PASS and tm is not None and cam.any():
+        want = (tm >= 0) & ~have
+        want &= cam[k][np.where(tm >= 0, tm, 0)]
+        if want.any():
+            tex2 = render_texture(scene, sources, dict(args, all_cells=dict(cells, tri_map=np.where(want, tm, -1)),
+                                                       rover_fallback=True), pool, rows_per_chunk)
+            got = want & (tex2["source"] >= 0)
+            rgb[got] = np.asarray(tex2["rgb"], np.float32)[got]
+            have |= got
+            second = int(got.sum())
+            tex2 = None
     from .ods import ROVER_GRAY_REL
     from .rover_surface import GRAY_SHADE
     colored = np.zeros(have.shape, bool)
@@ -1809,6 +1893,9 @@ def rover_part(scene, sources, station, pool=None, size: int = ROVER_TEXTURE_PX,
     UVo = np.concatenate([cells["uv"].reshape(-1, 2), np.repeat(uv_un, 3, axis=0)])
     Fo = np.arange(len(Vo)).reshape(-1, 3)
     rec = {"triangles": int(len(F)), "textured_triangles": int(len(k)),
+           "seen_by_frames": int(cam.sum()), "seen_by_frames_only": int((cam & ~seen_vp).sum()),
+           "seen_from_viewpoints_only": int((seen_vp & ~cam).sum()), "frames": int(len(cam_srcs)),
+           "texels_colored_without_rover_mask": second,
            "textured_area_share": round(float(area[k].sum() / max(area.sum(), 1e-12)), 4),
            "viewpoints": int(len(good)), "viewpoints_inside_the_model": int(len(vps) - len(good)),
            "view_radius_m": float(view_radius_m), "families": families, "texture_px": size,
